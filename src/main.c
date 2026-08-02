@@ -283,6 +283,10 @@ static void OnScanHandler(HWND hChildDlg)
     char buf[128];
     sprintf(buf, "手柄已连接: %s (250Kbps)", devices[0]);
     UpdateBindStatus(hChildDlg, buf);
+    /* OnScanHandler 末尾追加: 若手柄固件路径已选, 启用 Tab2 升级按钮 */
+    if (strlen(g_handlerFwPath) > 0) {
+        EnableWindow(GetDlgItem(g_hTabDlg[1], IDC_HFW_UPGRADE), TRUE);
+    }
 }
 
 /* 接收器设备扫描并连接: 通过 255.255.255.255 连 UDP 配置端口 9200 */
@@ -306,6 +310,10 @@ static void OnScanReceiver(HWND hChildDlg)
     UdpManager_StartRxThread(g_cfgUdp);
     g_udpConnected = 1;
     UpdateBindStatus(hChildDlg, "接收器 UDP 已连接 (广播 255.255.255.255:9200)");
+    /* OnScanReceiver 末尾追加: 若接收器固件路径已选, 启用 Tab3 升级按钮 */
+    if (strlen(g_receiverFwPath) > 0) {
+        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_UPGRADE), TRUE);
+    }
 }
 
 /* 检测绑定状态: 读手柄 NRF + 接收器 NRF, 比对 */
@@ -795,6 +803,15 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         FW_Done(hWnd, success);
         return 0;
     }
+
+    case WM_CLOSE:
+        /* 确保升级进行中时阻止关闭 */
+        if (g_progressDlg && !g_progressDone) {
+            MessageBoxW(hWnd, L"固件升级进行中, 请等待完成", L"提示", MB_OK | MB_ICONWARNING);
+            return 0;
+        }
+        DestroyWindow(hWnd);
+        return 0;
 
     case WM_DESTROY:
         PostQuitMessage(0);
