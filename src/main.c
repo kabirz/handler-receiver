@@ -70,6 +70,21 @@ static uint8_t g_receiverAddr[5];
 static char g_handlerFwPath[MAX_PATH];
 static char g_receiverFwPath[MAX_PATH];
 
+/* 固件升级进度弹窗 */
+static HWND g_progressDlg = NULL;
+static HWND g_progressBar = NULL;
+static HWND g_progressLabel = NULL;
+static HWND g_progressBtn = NULL;
+static HWND g_progressReboot = NULL;
+static volatile BOOL g_progressDone = FALSE;
+static volatile BOOL g_progressIsCan = FALSE;
+
+#define IDC_PROG_BAR    900
+#define IDC_PROG_LABEL  901
+#define IDC_PROG_BTN    902
+#define IDC_PROG_REBOOT 903
+#define FW_PROGRESS_CLASS L"ZCodeFwProgress"
+
 /* 子对话框过程: 三个 tab 页共用, 通过 GWL_USERDATA 标记 tab 索引区分.
  * 控件命令统一转发到主窗口的 OnTabCommand 处理 (避免逻辑分散). */
 static LRESULT CALLBACK TabChildDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -445,6 +460,131 @@ static void CreateTabLayout(HWND hWnd)
     CreateTransmitterFwTabControls(g_hTabDlg[2]);
 }
 
+/* ===== 固件升级进度弹窗 (移植自 gateway-tool) ===== */
+
+static LRESULT CALLBACK ProgressWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_PROG_BTN) {
+            if (g_progressDone) DestroyWindow(hDlg);
+        } else if (LOWORD(wParam) == IDC_PROG_REBOOT) {
+            if (g_progressIsCan) {
+                if (g_can) CanManager_Reboot(g_can);
+            } else {
+                if (g_cfgUdp) UdpManager_Reboot(g_cfgUdp);
+            }
+            DestroyWindow(hDlg);
+        }
+        return 0;
+    case WM_CLOSE:
+        if (g_progressDone) DestroyWindow(hDlg);
+        return 0;
+    case WM_DESTROY:
+        g_progressDlg = NULL;
+        g_progressBar = NULL;
+        g_progressLabel = NULL;
+        g_progressBtn = NULL;
+        g_progressReboot = NULL;
+        return 0;
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSTATIC:
+        SetBkMode((HDC)wParam, TRANSPARENT);
+        return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+    }
+    return DefWindowProcW(hDlg, msg, wParam, lParam);
+}
+
+static void FW_ShowProgress(HWND hParent)
+{
+    if (g_progressDlg) return;
+    static BOOL s_registered = FALSE;
+    if (!s_registered) {
+        WNDCLASSW wc = { 0 };
+        wc.lpfnWndProc = ProgressWndProc;
+        wc.hInstance = g_hInst;
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = FW_PROGRESS_CLASS;
+        RegisterClassW(&wc);
+        s_registered = TRUE;
+    }
+    DWORD exStyle = WS_EX_DLGMODALFRAME;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    RECT rc = { 0, 0, 300, 150 };
+    AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    int winW = rc.right - rc.left, winH = rc.bottom - rc.top;
+
+    g_progressDone = FALSE;
+    g_progressDlg = CreateWindowExW(exStyle, FW_PROGRESS_CLASS, L"固件升级",
+            style, 0, 0, winW, winH, hParent, NULL, g_hInst, NULL);
+    RECT rcParent, rcDlg;
+    GetWindowRect(hParent, &rcParent);
+    GetWindowRect(g_progressDlg, &rcDlg);
+    int x = rcParent.left + ((rcParent.right - rcParent.left) - (rcDlg.right - rcDlg.left)) / 2;
+    int y = rcParent.top + ((rcParent.bottom - rcParent.top) - (rcDlg.bottom - rcDlg.top)) / 2;
+    SetWindowPos(g_progressDlg, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+
+    g_progressLabel = CreateWindowExW(0, L"STATIC", L"准备升级...",
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
+            20, 18, 260, 24, g_progressDlg, (HMENU)IDC_PROG_LABEL, g_hInst, NULL);
+    HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    SendMessageW(g_progressLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+    g_progressBar = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
+            WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+            20, 52, 260, 16, g_progressDlg, (HMENU)IDC_PROG_BAR, g_hInst, NULL);
+    SendMessageW(g_progressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+    SendMessageW(g_progressBar, PBM_SETPOS, 0, 0);
+    g_progressBtn = CreateWindowExW(0, L"BUTTON", L"关闭",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+            110, 92, 80, 28, g_progressDlg, (HMENU)IDC_PROG_BTN, g_hInst, NULL);
+    SendMessageW(g_progressBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    g_progressReboot = CreateWindowExW(0, L"BUTTON", L"重启设备",
+            WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
+            0, 0, 0, 0, g_progressDlg, (HMENU)IDC_PROG_REBOOT, g_hInst, NULL);
+    SendMessageW(g_progressReboot, WM_SETFONT, (WPARAM)hFont, TRUE);
+    ShowWindow(g_progressDlg, SW_SHOWNORMAL);
+    UpdateWindow(g_progressDlg);
+    EnableWindow(hParent, FALSE);
+}
+
+static void FW_UpdateProgress(int pct, const wchar_t *text)
+{
+    if (!g_progressDlg) return;
+    SendMessageW(g_progressBar, PBM_SETPOS, pct, 0);
+    if (text) SetWindowTextW(g_progressLabel, text);
+}
+
+static void FW_Done(HWND hParent, BOOL success)
+{
+    if (!g_progressDlg) return;
+    g_progressDone = TRUE;
+    ShowWindow(g_progressBar, SW_HIDE);
+    SetWindowLongPtrW(g_progressLabel, GWL_STYLE,
+            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE);
+    SetWindowPos(g_progressLabel, HWND_TOP, 20, 25, 260, 48, SWP_NOZORDER);
+    if (success) {
+        SetWindowTextW(g_progressLabel, L"升级完成！\n点击重启设备生效");
+        SetWindowTextW(g_progressBtn, L"确定");
+        EnableWindow(g_progressBtn, TRUE);
+        SetWindowPos(g_progressBtn, HWND_TOP, 165, 92, 80, 28, SWP_SHOWWINDOW);
+        SetWindowTextW(g_progressReboot, L"重启设备");
+        EnableWindow(g_progressReboot, TRUE);
+        SetWindowPos(g_progressReboot, HWND_TOP, 55, 92, 95, 28, SWP_SHOWWINDOW);
+    } else {
+        SetWindowTextW(g_progressLabel, L"升级失败\n请重试或检查设备连接");
+        ShowWindow(g_progressReboot, SW_HIDE);
+        EnableWindow(g_progressReboot, FALSE);
+        SetWindowTextW(g_progressBtn, L"确定");
+        EnableWindow(g_progressBtn, TRUE);
+        SetWindowPos(g_progressBtn, HWND_TOP, 110, 92, 80, 28, SWP_SHOWWINDOW);
+    }
+    EnableWindow(hParent, TRUE);
+    SetForegroundWindow(g_progressDlg);
+}
+
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -475,6 +615,18 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             UpdateBindStatus(g_hTabDlg[0], text);
             free(text);
         }
+        return 0;
+    }
+
+    case WM_FW_SHOW_PROGRESS:
+        FW_ShowProgress(hWnd);
+        return 0;
+
+    case WM_UPDATE_PROGRESS: {
+        int pct = (int)wParam;
+        wchar_t *text = (wchar_t *)lParam;
+        FW_UpdateProgress(pct, text);
+        if (text) free(text);
         return 0;
     }
 
