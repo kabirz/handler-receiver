@@ -391,6 +391,52 @@ static void OnBind(HWND hChildDlg)
     }
 }
 
+/* 固件升级线程参数: CAN 与 UDP 共用 (UDP 分支在 Task 7 填) */
+typedef struct {
+    HWND hMain;
+    char path[MAX_PATH];
+    int isCan;          /* 1=CAN, 0=UDP */
+} FwUpgradeParam;
+
+/* CAN 升级进度回调: 转 PostMessage 到主线程 */
+static void can_fw_progress_cb(const char *pct_str, void *user_data)
+{
+    HWND hMain = (HWND)user_data;
+    if (!hMain || !pct_str) return;
+    int pct = atoi(pct_str);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    wchar_t buf[32];
+    swprintf(buf, 32, L"升级中 %d%%", pct);
+    PostMessageA(hMain, WM_UPDATE_PROGRESS, (WPARAM)pct, (LPARAM)_wcsdup(buf));
+}
+
+/* 固件升级工作线程: CAN/UDP 共用. 升级完成后 PostMessage WM_FW_COMPLETE */
+static DWORD WINAPI fw_upgrade_thread(LPVOID param)
+{
+    FwUpgradeParam *p = (FwUpgradeParam *)param;
+    HWND hMain = p->hMain;
+    g_progressIsCan = p->isCan ? TRUE : FALSE;
+
+    PostMessageA(hMain, WM_FW_SHOW_PROGRESS, 0, 0);
+
+    bool result = false;
+    if (p->isCan) {
+        /* CAN 升级: test_mode 固定 0 (永久). 传 NULL msg_cb 避免 gateway-tool 内部
+         * 日志走我们的回调链 (进度走 progress_cb 即可) */
+        result = CanManager_FirmwareUpgrade(g_can, p->path, 0,
+                                            NULL, NULL,
+                                            can_fw_progress_cb, (void *)hMain);
+    } else {
+        /* UDP 升级分支在 Task 7 填 */
+        result = false;
+    }
+
+    PostMessageA(hMain, WM_FW_COMPLETE, p->isCan ? 1 : 0, result ? 1 : 0);
+    free(p);
+    return 0;
+}
+
 /* 主窗口收到子对话框转发的命令: hChildDlg=子对话框句柄, wParam 含控件 ID (LOWORD) */
 static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
 {
@@ -406,10 +452,39 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
         case IDC_BTN_BIND:          OnBind(hChildDlg);         break;
         }
     } else if (tabIdx == 1) {
-        /* 手柄固件升级页 */
+        /* 手柄固件升级页 (CAN) */
         switch (cmdId) {
-        case IDC_HFW_BROWSE:         /* Task 6 实现 */ break;
-        case IDC_HFW_UPGRADE:        /* Task 6 实现 */ break;
+        case IDC_HFW_BROWSE: {
+            OPENFILENAMEA ofn;
+            char file[MAX_PATH] = { 0 };
+            memset(&ofn, 0, sizeof(ofn));
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = g_hMain;
+            ofn.lpstrFilter = "Firmware (*.bin)\0*.bin\0All\0*.*\0";
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (GetOpenFileNameA(&ofn)) {
+                strcpy(g_handlerFwPath, file);
+                SetWindowTextA(GetDlgItem(hChildDlg, IDC_HFW_FILE), file);
+                EnableWindow(GetDlgItem(hChildDlg, IDC_HFW_UPGRADE), g_canConnected ? TRUE : FALSE);
+            }
+            break;
+        }
+        case IDC_HFW_UPGRADE:
+            if (g_canConnected && strlen(g_handlerFwPath) > 0) {
+                EnableWindow(GetDlgItem(hChildDlg, IDC_HFW_UPGRADE), FALSE);
+                EnableWindow(GetDlgItem(hChildDlg, IDC_HFW_BROWSE), FALSE);
+                FwUpgradeParam *param = (FwUpgradeParam *)malloc(sizeof(FwUpgradeParam));
+                param->hMain = g_hMain;
+                strcpy(param->path, g_handlerFwPath);
+                param->isCan = 1;
+                CreateThread(NULL, 0, fw_upgrade_thread, param, 0, NULL);
+            } else if (!g_canConnected) {
+                MessageBoxW(g_hMain, L"请先连接手柄 (Tab1)", L"提示",
+                            MB_OK | MB_ICONWARNING);
+            }
+            break;
         }
     } else if (tabIdx == 2) {
         /* 接收器固件升级页 */
@@ -627,6 +702,19 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         wchar_t *text = (wchar_t *)lParam;
         FW_UpdateProgress(pct, text);
         if (text) free(text);
+        return 0;
+    }
+
+    case WM_FW_COMPLETE: {
+        BOOL isCan = (wParam == 1);
+        BOOL success = (lParam == 1);
+        /* 恢复对应 tab 的升级/浏览按钮 */
+        int upgradeId = isCan ? IDC_HFW_UPGRADE : IDC_TFW_UPGRADE;
+        int browseId  = isCan ? IDC_HFW_BROWSE  : IDC_TFW_BROWSE;
+        HWND hTabChild = isCan ? g_hTabDlg[1] : g_hTabDlg[2];
+        EnableWindow(GetDlgItem(hTabChild, upgradeId), TRUE);
+        EnableWindow(GetDlgItem(hTabChild, browseId), TRUE);
+        FW_Done(hWnd, success);
         return 0;
     }
 
