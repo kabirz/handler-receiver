@@ -130,7 +130,7 @@ static void CreateBindTabControls(HWND hDlg)
     HWND hStatus = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
             WS_VSCROLL | ES_READONLY,
-            20, y + 4, 420, 200, hDlg, (HMENU)IDC_STATUS_TEXT, g_hInst, NULL);
+            20, y + 4, 420, 200, hDlg, (HMENU)(INT_PTR)IDC_STATUS_TEXT, g_hInst, NULL);
     SendMessageW(hStatus, WM_SETFONT, (WPARAM)hFont, TRUE);
 }
 
@@ -166,6 +166,41 @@ static void CreateTransmitterFwTabControls(HWND hDlg)
     CreateFwTabControls(hDlg, IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE);
 }
 
+/* CAN 帧回调: 收到 0x105 RF24 配置响应时填 g_handlerAddr 并置标志 */
+static void can_frame_cb(const CanFrame *frame, void *user_data)
+{
+    (void)user_data;
+    if (frame->id == 0x105 /* CAN_ID_RF24_CONFIG_RESP */ && frame->dlc >= 7) {
+        /* [cmd 1B][channel 1B][addr 5B][reserved 1B] */
+        g_handlerCh = frame->data[1];
+        memcpy(g_handlerAddr, frame->data + 2, 5);
+        g_handlerAddrGot = TRUE;
+    }
+}
+
+static void can_msg_cb(const char *msg, void *user_data)
+{
+    (void)user_data;
+    /* CAN 状态消息转发到 Tab1 状态区 */
+    HWND hChild = g_hTabDlg[0];
+    if (hChild) {
+        char buf[256];
+        sprintf(buf, "[CAN] %s", msg ? msg : "");
+        PostMessageA(g_hMain, WM_UPDATE_STATUS, 0, (LPARAM)_strdup(buf));
+    }
+}
+
+static void udp_msg_cb(const char *msg, void *user_data)
+{
+    (void)user_data;
+    HWND hChild = g_hTabDlg[0];
+    if (hChild) {
+        char buf[256];
+        sprintf(buf, "[UDP] %s", msg ? msg : "");
+        PostMessageA(g_hMain, WM_UPDATE_STATUS, 0, (LPARAM)_strdup(buf));
+    }
+}
+
 /* 追加文本到 Tab1 状态区 */
 static void UpdateBindStatus(HWND hChildDlg, const char *msg)
 {
@@ -186,6 +221,161 @@ static void UpdateBindStatus(HWND hChildDlg, const char *msg)
     free(wbuf);
 }
 
+/* 发 CAN 0x104 GET_CONFIG 并等待 0x105 响应 (轮询标志, 超时 800ms).
+ * 成功返回 true, g_handlerCh/g_handlerAddr 已填. */
+static BOOL ReadHandlerNrf(void)
+{
+    g_handlerAddrGot = FALSE;
+    uint8_t data[8] = { 0 };
+    data[0] = RF24_CMD_GET_CONFIG;
+    if (!CanManager_Send(g_can, CAN_ID_RF24_CONFIG_CMD, data, 8)) {
+        return FALSE;
+    }
+    /* 轮询等待 (frame_cb 在 RX 线程置标志) */
+    for (int i = 0; i < 80; i++) {
+        if (g_handlerAddrGot) return TRUE;
+        Sleep(10);
+    }
+    return FALSE;
+}
+
+/* 手柄设备扫描并连接: 扫描 PCAN 设备, 0 个弹窗提示, 占用弹窗提示, 成功则 250K 连接 */
+static void OnScanHandler(HWND hChildDlg)
+{
+    if (g_canConnected) {
+        UpdateBindStatus(hChildDlg, "手柄已连接, 如需重连请先断开");
+        return;
+    }
+    char devices[16][256];
+    int count = CanManager_DetectDevice(g_can, devices, 16);
+    if (count == 0) {
+        MessageBoxW(g_hMain, L"未扫描到设备，请连接设备", L"提示", MB_OK | MB_ICONWARNING);
+        UpdateBindStatus(hChildDlg, "未扫描到 PCAN 设备");
+        return;
+    }
+    /* 取第一个设备 */
+    int channel = 0;
+    sscanf(devices[0], "PCAN_USB_%d (0x%X)", &channel, &channel);
+
+    if (!CanManager_Connect(g_can, channel, PCAN_BAUD_250K)) {
+        MessageBoxW(g_hMain, L"设备被占用，请查看并释放", L"连接失败",
+                    MB_OK | MB_ICONERROR);
+        UpdateBindStatus(hChildDlg, "CAN 连接失败 (设备可能被占用)");
+        return;
+    }
+    CanManager_StartRxThread(g_can);
+    g_canConnected = 1;
+    char buf[128];
+    sprintf(buf, "手柄已连接: %s (250Kbps)", devices[0]);
+    UpdateBindStatus(hChildDlg, buf);
+}
+
+/* 接收器设备扫描并连接: 通过 255.255.255.255 连 UDP 配置端口 9200 */
+static void OnScanReceiver(HWND hChildDlg)
+{
+    if (g_udpConnected) {
+        UpdateBindStatus(hChildDlg, "接收器已连接, 如需重连请先断开");
+        return;
+    }
+    /* 本地 9201 (固件监听 9200, 上位机本地 9201 收广播), 远程 9200, 显式有限广播 */
+    if (!UdpManager_Bind(g_cfgUdp, UDP_CHAN_CONFIG, 9201, "255.255.255.255", 9200)) {
+        int err = WSAGetLastError();
+        wchar_t wmsg[160];
+        swprintf(wmsg, 160,
+            L"接收器连接失败\n本地端口 9201 可能被占用 (WSA 错误码: %d)\n请关闭占用该端口的程序后重试",
+            err);
+        MessageBoxW(g_hMain, wmsg, L"连接失败", MB_OK | MB_ICONERROR);
+        UpdateBindStatus(hChildDlg, "UDP 配置通道 bind 失败 (端口 9201 可能被占用)");
+        return;
+    }
+    UdpManager_StartRxThread(g_cfgUdp);
+    g_udpConnected = 1;
+    UpdateBindStatus(hChildDlg, "接收器 UDP 已连接 (广播 255.255.255.255:9200)");
+}
+
+/* 检测绑定状态: 读手柄 NRF + 接收器 NRF, 比对 */
+static void OnCheckBind(HWND hChildDlg)
+{
+    if (!g_canConnected || !g_udpConnected) {
+        MessageBoxW(g_hMain, L"请先连接手柄和接收器", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    /* 1. 读手柄 NRF */
+    if (!ReadHandlerNrf()) {
+        MessageBoxW(g_hMain, L"读取手柄 NRF 地址超时\n请确认手柄已上电", L"错误",
+                    MB_OK | MB_ICONERROR);
+        UpdateBindStatus(hChildDlg, "读取手柄 NRF 超时");
+        return;
+    }
+    /* 2. 读接收器 NRF */
+    if (!UdpManager_GetRF24(g_cfgUdp, &g_receiverCh, g_receiverAddr)) {
+        MessageBoxW(g_hMain,
+            L"读取接收器 NRF 地址超时\n请确认接收器已上电并在同一网络",
+            L"错误", MB_OK | MB_ICONERROR);
+        UpdateBindStatus(hChildDlg, "读取接收器 NRF 超时");
+        return;
+    }
+    /* 3. 比对 */
+    BOOL all_zero = (g_receiverAddr[0]|g_receiverAddr[1]|g_receiverAddr[2]|
+                     g_receiverAddr[3]|g_receiverAddr[4]) == 0;
+    BOOL same = (memcmp(g_receiverAddr, g_handlerAddr, 5) == 0);
+
+    char h_str[16], r_str[16];
+    sprintf(h_str, "%02x%02x%02x%02x%02x", g_handlerAddr[0], g_handlerAddr[1],
+            g_handlerAddr[2], g_handlerAddr[3], g_handlerAddr[4]);
+    sprintf(r_str, "%02x%02x%02x%02x%02x", g_receiverAddr[0], g_receiverAddr[1],
+            g_receiverAddr[2], g_receiverAddr[3], g_receiverAddr[4]);
+    char buf[160];
+    sprintf(buf, "手柄NRF=%s(ch%d) 接收器NRF=%s(ch%d)", h_str, g_handlerCh, r_str, g_receiverCh);
+    UpdateBindStatus(hChildDlg, buf);
+
+    if (all_zero) {
+        MessageBoxW(g_hMain, L"设备未绑定\n接收器 NRF 地址为空", L"绑定状态",
+                    MB_OK | MB_ICONINFORMATION);
+    } else if (!same) {
+        MessageBoxW(g_hMain, L"接收器已绑定其他设备", L"绑定状态",
+                    MB_OK | MB_ICONWARNING);
+    } else {
+        MessageBoxW(g_hMain, L"已绑定本设备", L"绑定状态",
+                    MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+/* 绑定设备: 把手柄 NRF 地址写入接收器 */
+static void OnBind(HWND hChildDlg)
+{
+    if (!g_canConnected || !g_udpConnected) {
+        MessageBoxW(g_hMain, L"请先连接手柄和接收器", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    /* 确保已有手柄 NRF (没读过则先读) */
+    if (!g_handlerAddrGot) {
+        if (!ReadHandlerNrf()) {
+            MessageBoxW(g_hMain, L"读取手柄 NRF 地址超时", L"错误",
+                        MB_OK | MB_ICONERROR);
+            UpdateBindStatus(hChildDlg, "绑定失败: 读取手柄 NRF 超时");
+            return;
+        }
+    }
+    if (MessageBoxW(g_hMain, L"确认把手柄 NRF 地址写入接收器?",
+                    L"确认绑定", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        return;
+    }
+    if (UdpManager_SetRF24(g_cfgUdp, g_handlerCh, g_handlerAddr)) {
+        char buf[128];
+        char h_str[16];
+        sprintf(h_str, "%02x%02x%02x%02x%02x", g_handlerAddr[0], g_handlerAddr[1],
+                g_handlerAddr[2], g_handlerAddr[3], g_handlerAddr[4]);
+        sprintf(buf, "绑定成功, 已写入地址 %s (ch%d)", h_str, g_handlerCh);
+        UpdateBindStatus(hChildDlg, buf);
+        MessageBoxW(g_hMain, L"绑定成功", L"成功", MB_OK | MB_ICONINFORMATION);
+    } else {
+        UpdateBindStatus(hChildDlg, "绑定失败: 发送 SetRF24 命令失败");
+        MessageBoxW(g_hMain, L"绑定失败\n发送 SetRF24 命令失败", L"错误",
+                    MB_OK | MB_ICONERROR);
+    }
+}
+
 /* 主窗口收到子对话框转发的命令: hChildDlg=子对话框句柄, wParam 含控件 ID (LOWORD) */
 static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
 {
@@ -195,10 +385,10 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
     if (tabIdx == 0) {
         /* 设备绑定页 */
         switch (cmdId) {
-        case IDC_BTN_SCAN_HANDLER:   /* Task 4 实现 */ break;
-        case IDC_BTN_SCAN_RECEIVER:  /* Task 4 实现 */ break;
-        case IDC_BTN_CHECK_BIND:     /* Task 4 实现 */ break;
-        case IDC_BTN_BIND:           /* Task 4 实现 */ break;
+        case IDC_BTN_SCAN_HANDLER:  OnScanHandler(hChildDlg);  break;
+        case IDC_BTN_SCAN_RECEIVER: OnScanReceiver(hChildDlg); break;
+        case IDC_BTN_CHECK_BIND:    OnCheckBind(hChildDlg);    break;
+        case IDC_BTN_BIND:          OnBind(hChildDlg);         break;
         }
     } else if (tabIdx == 1) {
         /* 手柄固件升级页 */
@@ -279,6 +469,15 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
 
+    case WM_UPDATE_STATUS: {
+        char *text = (char *)lParam;
+        if (text) {
+            UpdateBindStatus(g_hTabDlg[0], text);
+            free(text);
+        }
+        return 0;
+    }
+
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -294,6 +493,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     InitCommonControlsEx(&icex);
 
     g_hInst = hInstance;
+
+    /* 创建 CAN/UDP 管理器 */
+    g_can = CanManager_Create();
+    g_cfgUdp = UdpManager_Create();
+    CanManager_SetMsgCallback(g_can, can_msg_cb, NULL);
+    CanManager_SetFrameCallback(g_can, can_frame_cb, NULL);
+    UdpManager_SetMsgCallback(g_cfgUdp, udp_msg_cb, NULL);
 
     WNDCLASSW wc = { 0 };
     wc.lpfnWndProc = MainWndProc;
@@ -332,5 +538,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             DispatchMessageW(&m);
         }
     }
+    /* 消息循环退出后销毁 */
+    CanManager_Destroy(g_can);
+    UdpManager_Destroy(g_cfgUdp);
     return (int)m.wParam;
 }
