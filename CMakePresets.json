@@ -1,6 +1,10 @@
 {
     "version": 7,
-    "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 25,
+        "patch": 0
+    },
     "configurePresets": [
         {
             "name": "default",
@@ -8,9 +12,9 @@
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build",
             "cacheVariables": {
-                "CMAKE_SYSTEM_NAME": "Windows",
-                "CMAKE_C_COMPILER": "x86_64-w64-mingw32-gcc",
-                "CMAKE_RC_COMPILER": "x86_64-w64-mingw32-windres"
+                  "CMAKE_SYSTEM_NAME": "Windows",
+                  "CMAKE_C_COMPILER": "x86_64-w64-mingw32-gcc",
+                  "CMAKE_RC_COMPILER": "x86_64-w64-mingw32-windres"
             }
         },
         {
@@ -20,7 +24,83 @@
         }
     ],
     "buildPresets": [
-        { "name": "Release",    "configurePreset": "default", "configuration": "Release" },
-        { "name": "vs-release", "configurePreset": "vs",      "configuration": "Release" }
+        {
+            "name": "Release",
+            "configurePreset": "default",
+            "configuration": "Release"
+        },
+        {
+            "name": "Debug",
+            "configurePreset": "default",
+            "configuration": "Debug"
+        },
+        {
+            "name": "vs-release",
+            "configurePreset": "vs",
+            "configuration": "Release"
+        },
+        {
+            "name": "vs-debug",
+            "configurePreset": "vs",
+            "configuration": "Debug"
+        }
+    ],
+    "workflowPresets": [
+        {
+            "name": "release",
+            "displayName": "Release Workflow (MinGW)",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "default"
+                },
+                {
+                    "type": "build",
+                    "name": "Release"
+                }
+            ]
+        },
+        {
+            "name": "debug",
+            "displayName": "Debug Workflow (MinGW)",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "default"
+                },
+                {
+                    "type": "build",
+                    "name": "Debug"
+                }
+            ]
+        },
+        {
+            "name": "vs-release",
+            "displayName": "Release Workflow (Visual Studio)",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "vs"
+                },
+                {
+                    "type": "build",
+                    "name": "vs-release"
+                }
+            ]
+        },
+        {
+            "name": "vs-debug",
+            "displayName": "Debug Workflow (Visual Studio)",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "vs"
+                },
+                {
+                    "type": "build",
+                    "name": "vs-debug"
+                }
+            ]
+        }
     ]
 }
