@@ -428,8 +428,57 @@ static DWORD WINAPI fw_upgrade_thread(LPVOID param)
                                             NULL, NULL,
                                             can_fw_progress_cb, (void *)hMain);
     } else {
-        /* UDP 升级分支在 Task 7 填 */
-        result = false;
+        /* UDP 升级: START(size) → DATA(256B/包, offset 校验) → END(crc+testmode) */
+        HANDLE hFile = CreateFileA(p->path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) {
+            MessageBoxW(NULL, L"打开固件文件失败", L"错误", MB_OK | MB_ICONERROR);
+        } else {
+            DWORD fileSize = GetFileSize(hFile, NULL);
+            uint8_t *fileData = (uint8_t *)malloc(fileSize);
+            DWORD bytesRead;
+            ReadFile(hFile, fileData, fileSize, &bytesRead, NULL);
+            CloseHandle(hFile);
+
+            uint16_t crc = UdpManager_CRC16_CCITT(fileData, fileSize);
+
+            result = false;
+            if (UdpManager_FirmwareStart(g_cfgUdp, fileSize)) {
+                int offset = 0, chunk = 256;
+                result = true;
+                while (offset < (int)fileSize) {
+                    int send_len = ((int)fileSize - offset > chunk) ? chunk : ((int)fileSize - offset);
+                    uint32_t got = 0;
+                    if (!UdpManager_FirmwareData(g_cfgUdp, fileData + offset,
+                                                 send_len, offset + send_len, &got)) {
+                        wchar_t wmsg[128];
+                        swprintf(wmsg, 128,
+                            L"数据发送失败 offset=%d\n固件 offset=%lu",
+                            offset, got);
+                        MessageBoxW(NULL, wmsg, L"升级失败", MB_OK | MB_ICONERROR);
+                        result = false;
+                        break;
+                    }
+                    offset += send_len;
+                    int pct = (int)((long long)offset * 100 / fileSize);
+                    wchar_t buf[32];
+                    swprintf(buf, 32, L"升级中 %d%%", pct);
+                    PostMessageA(hMain, WM_UPDATE_PROGRESS, (WPARAM)pct, (LPARAM)_wcsdup(buf));
+                }
+                if (result) {
+                    if (UdpManager_FirmwareEnd(g_cfgUdp, 0, crc)) {
+                        /* 成功, 不弹窗 (FW_Done 会显示) */
+                    } else {
+                        MessageBoxW(NULL, L"烧写失败 (CRC 不匹配或错误)", L"升级失败",
+                                    MB_OK | MB_ICONERROR);
+                        result = false;
+                    }
+                }
+            } else {
+                MessageBoxW(NULL, L"开始烧写失败 (固件未响应 START)", L"升级失败",
+                            MB_OK | MB_ICONERROR);
+            }
+            free(fileData);
+        }
     }
 
     PostMessageA(hMain, WM_FW_COMPLETE, p->isCan ? 1 : 0, result ? 1 : 0);
@@ -487,10 +536,39 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
             break;
         }
     } else if (tabIdx == 2) {
-        /* 接收器固件升级页 */
+        /* 接收器固件升级页 (UDP) */
         switch (cmdId) {
-        case IDC_TFW_BROWSE:         /* Task 7 实现 */ break;
-        case IDC_TFW_UPGRADE:        /* Task 7 实现 */ break;
+        case IDC_TFW_BROWSE: {
+            OPENFILENAMEA ofn;
+            char file[MAX_PATH] = { 0 };
+            memset(&ofn, 0, sizeof(ofn));
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = g_hMain;
+            ofn.lpstrFilter = "Firmware (*.bin)\0*.bin\0All\0*.*\0";
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (GetOpenFileNameA(&ofn)) {
+                strcpy(g_receiverFwPath, file);
+                SetWindowTextA(GetDlgItem(hChildDlg, IDC_TFW_FILE), file);
+                EnableWindow(GetDlgItem(hChildDlg, IDC_TFW_UPGRADE), g_udpConnected ? TRUE : FALSE);
+            }
+            break;
+        }
+        case IDC_TFW_UPGRADE:
+            if (g_udpConnected && strlen(g_receiverFwPath) > 0) {
+                EnableWindow(GetDlgItem(hChildDlg, IDC_TFW_UPGRADE), FALSE);
+                EnableWindow(GetDlgItem(hChildDlg, IDC_TFW_BROWSE), FALSE);
+                FwUpgradeParam *param = (FwUpgradeParam *)malloc(sizeof(FwUpgradeParam));
+                param->hMain = g_hMain;
+                strcpy(param->path, g_receiverFwPath);
+                param->isCan = 0;
+                CreateThread(NULL, 0, fw_upgrade_thread, param, 0, NULL);
+            } else if (!g_udpConnected) {
+                MessageBoxW(g_hMain, L"请先连接接收器 (Tab1)", L"提示",
+                            MB_OK | MB_ICONWARNING);
+            }
+            break;
         }
     }
 }
