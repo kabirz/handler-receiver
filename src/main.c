@@ -76,8 +76,9 @@ static LRESULT CALLBACK TabChildDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPAR
 {
     switch (msg) {
     case WM_COMMAND:
-        /* 把子对话框的命令转发给主窗口处理 */
-        PostMessageW(g_hMain, WM_APP + 100, (WPARAM)hDlg, lParam);
+        /* wParam 低字 = 控件 ID, lParam = 控件句柄. 转发时 wParam 透传 (含控件 ID),
+         * 子对话框句柄放 lParam, 主窗口 OnTabCommand 据此取 tab index. */
+        PostMessageW(g_hMain, WM_APP + 100, wParam, (LPARAM)hDlg);
         return 0;
     case WM_CTLCOLORDLG:
     case WM_CTLCOLORSTATIC:
@@ -105,6 +106,114 @@ static void RegisterTabChildClass(void)
 
 /* 主窗口过程 */
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+/* 创建各 tab 子对话框控件 (在 CreateTabLayout 后调用) */
+static void CreateBindTabControls(HWND hDlg)
+{
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    int y = 10;
+    /* 4 个按钮, 纵向排列, 宽 200, 高 28 */
+    struct { const wchar_t *text; int id; } btns[] = {
+        { L"手柄设备扫描并连接",  IDC_BTN_SCAN_HANDLER  },
+        { L"接收器设备扫描并连接", IDC_BTN_SCAN_RECEIVER },
+        { L"检测绑定状态",        IDC_BTN_CHECK_BIND    },
+        { L"绑定设备",            IDC_BTN_BIND          },
+    };
+    for (int i = 0; i < 4; i++) {
+        HWND hBtn = CreateWindowExW(0, L"BUTTON", btns[i].text,
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                20, y, 200, 28, hDlg, (HMENU)(INT_PTR)btns[i].id, g_hInst, NULL);
+        SendMessageW(hBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+        y += 34;
+    }
+    /* 状态显示区: 多行只读 EDIT */
+    HWND hStatus = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
+            WS_VSCROLL | ES_READONLY,
+            20, y + 4, 420, 200, hDlg, (HMENU)IDC_STATUS_TEXT, g_hInst, NULL);
+    SendMessageW(hStatus, WM_SETFONT, (WPARAM)hFont, TRUE);
+}
+
+/* 通用: 创建 升级 tab 的 [路径框 + 浏览 + 升级] 三件套 */
+static void CreateFwTabControls(HWND hDlg, int file_id, int browse_id, int upgrade_id)
+{
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HWND hLabel = CreateWindowExW(0, L"STATIC", L"固件文件:",
+            WS_CHILD | WS_VISIBLE, 20, 20, 60, 16,
+            hDlg, NULL, g_hInst, NULL);
+    HWND hFile = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+            80, 18, 260, 22, hDlg, (HMENU)(INT_PTR)file_id, g_hInst, NULL);
+    HWND hBrowse = CreateWindowExW(0, L"BUTTON", L"浏览...",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            350, 18, 60, 22, hDlg, (HMENU)(INT_PTR)browse_id, g_hInst, NULL);
+    HWND hUpg = CreateWindowExW(0, L"BUTTON", L"升级",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+            180, 60, 80, 28, hDlg, (HMENU)(INT_PTR)upgrade_id, g_hInst, NULL);
+    SendMessageW(hLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(hFile,  WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(hBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(hUpg,   WM_SETFONT, (WPARAM)hFont, TRUE);
+}
+
+static void CreateHandlerFwTabControls(HWND hDlg)
+{
+    CreateFwTabControls(hDlg, IDC_HFW_FILE, IDC_HFW_BROWSE, IDC_HFW_UPGRADE);
+}
+
+static void CreateTransmitterFwTabControls(HWND hDlg)
+{
+    CreateFwTabControls(hDlg, IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE);
+}
+
+/* 追加文本到 Tab1 状态区 */
+static void UpdateBindStatus(HWND hChildDlg, const char *msg)
+{
+    HWND hStatus = GetDlgItem(hChildDlg, IDC_STATUS_TEXT);
+    if (!hStatus) return;
+    /* msg 为 GBK (源码 -fexec-charset=GBK); 转 UTF-16 写入更稳 */
+    int wlen = MultiByteToWideChar(CP_ACP, 0, msg, -1, NULL, 0);
+    if (wlen <= 0) return;
+    wchar_t *wbuf = (wchar_t *)malloc(wlen * sizeof(wchar_t));
+    if (!wbuf) return;
+    MultiByteToWideChar(CP_ACP, 0, msg, -1, wbuf, wlen);
+    int textLen = GetWindowTextLengthW(hStatus);
+    SendMessageW(hStatus, EM_SETSEL, textLen, textLen);
+    SendMessageW(hStatus, EM_REPLACESEL, FALSE, (LPARAM)wbuf);
+    /* 补换行 */
+    SendMessageW(hStatus, EM_REPLACESEL, FALSE, (LPARAM)L"\r\n");
+    SendMessageW(hStatus, EM_SCROLLCARET, 0, 0);
+    free(wbuf);
+}
+
+/* 主窗口收到子对话框转发的命令: hChildDlg=子对话框句柄, wParam 含控件 ID (LOWORD) */
+static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
+{
+    int cmdId = LOWORD(wParam);
+    int tabIdx = (int)GetWindowLongPtrW(hChildDlg, GWLP_USERDATA);
+
+    if (tabIdx == 0) {
+        /* 设备绑定页 */
+        switch (cmdId) {
+        case IDC_BTN_SCAN_HANDLER:   /* Task 4 实现 */ break;
+        case IDC_BTN_SCAN_RECEIVER:  /* Task 4 实现 */ break;
+        case IDC_BTN_CHECK_BIND:     /* Task 4 实现 */ break;
+        case IDC_BTN_BIND:           /* Task 4 实现 */ break;
+        }
+    } else if (tabIdx == 1) {
+        /* 手柄固件升级页 */
+        switch (cmdId) {
+        case IDC_HFW_BROWSE:         /* Task 6 实现 */ break;
+        case IDC_HFW_UPGRADE:        /* Task 6 实现 */ break;
+        }
+    } else if (tabIdx == 2) {
+        /* 接收器固件升级页 */
+        switch (cmdId) {
+        case IDC_TFW_BROWSE:         /* Task 7 实现 */ break;
+        case IDC_TFW_UPGRADE:        /* Task 7 实现 */ break;
+        }
+    }
+}
 
 /* 创建 Tab 控件 + 3 个子对话框, 在 WM_CREATE 中调用 */
 static void CreateTabLayout(HWND hWnd)
@@ -139,6 +248,11 @@ static void CreateTabLayout(HWND hWnd)
         SetWindowLongPtrW(g_hTabDlg[i], GWLP_USERDATA, (LONG_PTR)i);
         ShowWindow(g_hTabDlg[i], i == 0 ? SW_SHOW : SW_HIDE);
     }
+
+    /* 创建各 tab 控件 */
+    CreateBindTabControls(g_hTabDlg[0]);
+    CreateHandlerFwTabControls(g_hTabDlg[1]);
+    CreateTransmitterFwTabControls(g_hTabDlg[2]);
 }
 
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -160,10 +274,10 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
 
-    case WM_APP + 100:
-        /* 子对话框命令转发, lParam 是子对话框的 WM_COMMAND lParam */
-        /* OnTabCommand 将在 Task 3 实现, 此处暂忽略 */
+    case WM_APP + 100: {
+        OnTabCommand((HWND)lParam, wParam);   /* wParam 含控件 ID (LOWORD) */
         return 0;
+    }
 
     case WM_DESTROY:
         PostQuitMessage(0);
