@@ -1,0 +1,26 @@
+{
+    "version": 7,
+    "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "default",
+            "displayName": "MinGW (Linux Cross-Compile)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_SYSTEM_NAME": "Windows",
+                "CMAKE_C_COMPILER": "x86_64-w64-mingw32-gcc",
+                "CMAKE_RC_COMPILER": "x86_64-w64-mingw32-windres"
+            }
+        },
+        {
+            "name": "vs",
+            "displayName": "Visual Studio (Windows Native)",
+            "binaryDir": "${sourceDir}/out"
+        }
+    ],
+    "buildPresets": [
+        { "name": "Release",    "configurePreset": "default", "configuration": "Release" },
+        { "name": "vs-release", "configurePreset": "vs",      "configuration": "Release" }
+    ]
+}
