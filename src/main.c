@@ -30,11 +30,14 @@
 #define CAN_ID_RF24_CONFIG_CMD   0x104
 #define RF24_CMD_GET_CONFIG      0x02
 
-/* 运行时控件 ID (Tab1 设备绑定) */
-#define IDC_BTN_SCAN_HANDLER     1001
-#define IDC_BTN_SCAN_RECEIVER    1002
-#define IDC_BTN_CHECK_BIND       1003
-#define IDC_BTN_BIND             1004
+/* 运行时控件 ID (Tab1 手柄绑定) — 仿 gateway-tool 左侧 CAN / 右侧通道配置布局 */
+#define IDC_CAN_DEVICE           1001   /* 手柄: 设备下拉 (CBS_DROPDOWNLIST) */
+#define IDC_CAN_REFRESH          1002   /* 手柄: 刷新按钮 */
+#define IDC_CAN_CONNECT          1003   /* 手柄: 连接/断开 按钮 */
+#define IDC_UDP_IP               1004   /* 接收器: 目标 IP (CBS_DROPDOWN) */
+#define IDC_UDP_CONNECT          1005   /* 接收器: 连接/断开 按钮 */
+#define IDC_BTN_CHECK_BIND       1006   /* 检测绑定状态 */
+#define IDC_BTN_BIND             1007   /* 绑定设备 */
 /* Tab2 手柄固件升级 */
 #define IDC_HFW_FILE             1101
 #define IDC_HFW_BROWSE           1102
@@ -120,19 +123,88 @@ static void RegisterTabChildClass(void)
 /* 主窗口过程 */
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+/* 刷新手柄设备下拉框 (扫 PCAN_USB 通道, 仿 gateway-tool RefreshDevices) */
+static void RefreshCanDevices(HWND hCombo)
+{
+    SendMessageW(hCombo, CB_RESETCONTENT, 0, 0);
+    char devices[16][256];
+    int count = CanManager_DetectDevice(g_can, devices, 16);
+    for (int i = 0; i < count; i++) {
+        /* 设备名是 ASCII, 转 wchar_t 加入下拉 */
+        wchar_t wname[256];
+        MultiByteToWideChar(CP_ACP, 0, devices[i], -1, wname, 256);
+        SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)wname);
+    }
+    if (count > 0) {
+        SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
+    }
+}
+
 /* 创建各 tab 子对话框控件 (在 CreateTabLayout 后调用) */
 static void CreateBindTabControls(HWND hDlg)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    int y = 20;
-    /* 4 个按钮, 纵向排列, 宽 240, 高 32. 无状态区: 所有提示走 MessageBoxW 弹窗 */
+
+    /* ===== 手柄区 groupbox (仿 gateway-tool 左侧 CAN): 设备下拉 + 刷新 + 连接, 无波特率 (固定 250K) ===== */
+    CreateWindowExW(0, L"BUTTON", L"手柄 (CAN, 250K)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, 6, 436, 70, hDlg, NULL, g_hInst, NULL);
+    /* "设备:" 标签 */
+    HWND hLbl = CreateWindowExW(0, L"STATIC", L"设备:",
+            WS_CHILD | WS_VISIBLE, 20, 30, 36, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 设备下拉 (CBS_DROPDOWNLIST, 不可编辑) */
+    HWND hDev = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
+            56, 28, 230, 200, hDlg, (HMENU)(INT_PTR)IDC_CAN_DEVICE, g_hInst, NULL);
+    SendMessageW(hDev, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 刷新 / 连接 按钮 */
+    HWND hRefresh = CreateWindowExW(0, L"BUTTON", L"刷新",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            296, 28, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_REFRESH, g_hInst, NULL);
+    SendMessageW(hRefresh, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hCanConn = CreateWindowExW(0, L"BUTTON", L"连接",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            366, 28, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_CONNECT, g_hInst, NULL);
+    SendMessageW(hCanConn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 预填设备列表 */
+    RefreshCanDevices(hDev);
+
+    /* ===== 接收器区 groupbox (仿 gateway-tool 右侧通道配置, 只保留 IP): 目标IP + 连接 ===== */
+    CreateWindowExW(0, L"BUTTON", L"接收器 (UDP)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, 84, 436, 70, hDlg, NULL, g_hInst, NULL);
+    hLbl = CreateWindowExW(0, L"STATIC", L"目标IP:",
+            WS_CHILD | WS_VISIBLE, 20, 108, 44, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* IP 下拉 (CBS_DROPDOWN, 可编辑输入). 预填 255.255.255.255 (广播) + 各网卡广播地址 */
+    HWND hIp = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP,
+            66, 106, 220, 200, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
+    SendMessageW(hIp, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(hIp, CB_ADDSTRING, 0, (LPARAM)L"255.255.255.255");
+    {
+        char baddrs[8][16];
+        int n = UdpManager_GetBroadcastAddrs(baddrs, 8);
+        for (int i = 0; i < n; i++) {
+            wchar_t wb[16];
+            MultiByteToWideChar(CP_ACP, 0, baddrs[i], -1, wb, 16);
+            SendMessageW(hIp, CB_ADDSTRING, 0, (LPARAM)wb);
+        }
+    }
+    SendMessageW(hIp, CB_SETCURSEL, 0, 0);  /* 默认选 255.255.255.255 */
+    HWND hUdpConn = CreateWindowExW(0, L"BUTTON", L"连接",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            366, 106, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_CONNECT, g_hInst, NULL);
+    SendMessageW(hUdpConn, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    /* ===== 操作按钮: 检测绑定状态 / 绑定设备 ===== */
+    int y = 168;
     struct { const wchar_t *text; int id; } btns[] = {
-        { L"手柄设备扫描并连接",  IDC_BTN_SCAN_HANDLER  },
-        { L"接收器设备扫描并连接", IDC_BTN_SCAN_RECEIVER },
-        { L"检测绑定状态",        IDC_BTN_CHECK_BIND    },
-        { L"绑定设备",            IDC_BTN_BIND          },
+        { L"检测绑定状态",  IDC_BTN_CHECK_BIND },
+        { L"绑定设备",      IDC_BTN_BIND       },
     };
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 2; i++) {
         HWND hBtn = CreateWindowExW(0, L"BUTTON", btns[i].text,
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 30, y, 240, 32, hDlg, (HMENU)(INT_PTR)btns[i].id, g_hInst, NULL);
@@ -216,23 +288,32 @@ static BOOL ReadHandlerNrf(void)
     return FALSE;
 }
 
-/* 手柄设备扫描并连接: 扫描 PCAN 设备, 0 个弹窗提示, 占用弹窗提示, 成功则 250K 连接 */
-static void OnScanHandler(HWND hChildDlg)
+/* 手柄连接/断开 (从下拉取选中设备, 固定 250K). 已连接则断开. */
+static void OnCanConnect(HWND hChildDlg)
 {
-    (void)hChildDlg;
     if (g_canConnected) {
-        MessageBoxW(g_hMain, L"手柄已连接", L"提示", MB_OK | MB_ICONINFORMATION);
+        /* 断开 */
+        CanManager_Disconnect(g_can);
+        g_canConnected = 0;
+        SetWindowTextW(GetDlgItem(hChildDlg, IDC_CAN_CONNECT), L"连接");
+        EnableWindow(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), TRUE);
+        EnableWindow(GetDlgItem(hChildDlg, IDC_CAN_REFRESH), TRUE);
         return;
     }
-    char devices[16][256];
-    int count = CanManager_DetectDevice(g_can, devices, 16);
-    if (count == 0) {
-        MessageBoxW(g_hMain, L"未扫描到设备，请连接设备", L"提示", MB_OK | MB_ICONWARNING);
+    /* 连接: 从下拉取选中设备名 */
+    int sel = (int)SendMessageW(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), CB_GETCURSEL, 0, 0);
+    if (sel < 0) {
+        MessageBoxW(g_hMain, L"请先选择设备 (或点刷新扫描)", L"提示",
+                    MB_OK | MB_ICONWARNING);
         return;
     }
-    /* 取第一个设备 */
+    wchar_t wname[256] = { 0 };
+    SendMessageW(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), CB_GETLBTEXT, sel, (LPARAM)wname);
+    char dev[256] = { 0 };
+    WideCharToMultiByte(CP_ACP, 0, wname, -1, dev, sizeof(dev), NULL, NULL);
+
     int channel = 0;
-    sscanf(devices[0], "PCAN_USB_%d (0x%X)", &channel, &channel);
+    sscanf(dev, "PCAN_USB_%d (0x%X)", &channel, &channel);
 
     if (!CanManager_Connect(g_can, channel, PCAN_BAUD_250K)) {
         MessageBoxW(g_hMain, L"设备被占用，请查看并释放", L"连接失败",
@@ -241,26 +322,38 @@ static void OnScanHandler(HWND hChildDlg)
     }
     CanManager_StartRxThread(g_can);
     g_canConnected = 1;
-    /* 成功提示: 设备名是 ASCII (如 PCAN_USB_0), 用 %hs 安全拼入 wchar_t 缓冲 */
-    wchar_t wmsg[160];
-    swprintf(wmsg, 160, L"手柄已连接: %hs (250Kbps)", devices[0]);
-    MessageBoxW(g_hMain, wmsg, L"手柄", MB_OK | MB_ICONINFORMATION);
-    /* OnScanHandler 末尾追加: 若手柄固件路径已选, 启用 Tab2 升级按钮 */
+    SetWindowTextW(GetDlgItem(hChildDlg, IDC_CAN_CONNECT), L"断开");
+    EnableWindow(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), FALSE);
+    EnableWindow(GetDlgItem(hChildDlg, IDC_CAN_REFRESH), FALSE);
+    /* 若手柄固件路径已选, 启用 Tab2 升级按钮 */
     if (strlen(g_handlerFwPath) > 0) {
         EnableWindow(GetDlgItem(g_hTabDlg[1], IDC_HFW_UPGRADE), TRUE);
     }
 }
 
-/* 接收器设备扫描并连接: 通过 255.255.255.255 连 UDP 配置端口 9200 */
-static void OnScanReceiver(HWND hChildDlg)
+/* 接收器连接/断开 (从 IP 框取目标 IP, 配置端口固定 9200). 已连接则断开. */
+static void OnUdpConnect(HWND hChildDlg)
 {
-    (void)hChildDlg;
     if (g_udpConnected) {
-        MessageBoxW(g_hMain, L"接收器已连接", L"提示", MB_OK | MB_ICONINFORMATION);
+        /* 断开 */
+        UdpManager_Unbind(g_cfgUdp);
+        g_udpConnected = 0;
+        SetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_CONNECT), L"连接");
+        EnableWindow(GetDlgItem(hChildDlg, IDC_UDP_IP), TRUE);
         return;
     }
-    /* 本地 9201 (固件监听 9200, 上位机本地 9201 收广播), 远程 9200, 显式有限广播 */
-    if (!UdpManager_Bind(g_cfgUdp, UDP_CHAN_CONFIG, 9201, "255.255.255.255", 9200)) {
+    /* 取 IP 框内容 (CBS_DROPDOWN 可编辑, 读编辑文本) */
+    wchar_t wip[64] = { 0 };
+    GetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_IP), wip, 64);
+    char ip[64] = { 0 };
+    WideCharToMultiByte(CP_ACP, 0, wip, -1, ip, sizeof(ip), NULL, NULL);
+    if (!ip[0]) {
+        MessageBoxW(g_hMain, L"请填写目标 IP (或选 255.255.255.255 广播)", L"提示",
+                    MB_OK | MB_ICONWARNING);
+        return;
+    }
+    /* 本地 9201, 远程 9200. IP 空/0 → 广播自动发现; 255.255.255.255 → 有限广播 */
+    if (!UdpManager_Bind(g_cfgUdp, UDP_CHAN_CONFIG, 9201, ip, 9200)) {
         int err = WSAGetLastError();
         wchar_t wmsg[160];
         swprintf(wmsg, 160,
@@ -271,9 +364,9 @@ static void OnScanReceiver(HWND hChildDlg)
     }
     UdpManager_StartRxThread(g_cfgUdp);
     g_udpConnected = 1;
-    MessageBoxW(g_hMain, L"接收器 UDP 已连接 (广播 255.255.255.255:9200)",
-                L"接收器", MB_OK | MB_ICONINFORMATION);
-    /* OnScanReceiver 末尾追加: 若接收器固件路径已选, 启用 Tab3 升级按钮 */
+    SetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_CONNECT), L"断开");
+    EnableWindow(GetDlgItem(hChildDlg, IDC_UDP_IP), FALSE);
+    /* 若接收器固件路径已选, 启用 Tab3 升级按钮 */
     if (strlen(g_receiverFwPath) > 0) {
         EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_UPGRADE), TRUE);
     }
@@ -459,10 +552,11 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
     int tabIdx = (int)GetWindowLongPtrW(hChildDlg, GWLP_USERDATA);
 
     if (tabIdx == 0) {
-        /* 设备绑定页 */
+        /* 手柄绑定页 */
         switch (cmdId) {
-        case IDC_BTN_SCAN_HANDLER:  OnScanHandler(hChildDlg);  break;
-        case IDC_BTN_SCAN_RECEIVER: OnScanReceiver(hChildDlg); break;
+        case IDC_CAN_REFRESH:       RefreshCanDevices(GetDlgItem(hChildDlg, IDC_CAN_DEVICE)); break;
+        case IDC_CAN_CONNECT:       OnCanConnect(hChildDlg);   break;
+        case IDC_UDP_CONNECT:       OnUdpConnect(hChildDlg);   break;
         case IDC_BTN_CHECK_BIND:    OnCheckBind(hChildDlg);    break;
         case IDC_BTN_BIND:          OnBind(hChildDlg);         break;
         }
