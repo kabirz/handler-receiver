@@ -379,25 +379,20 @@ static void CreateTransmitterFwTabControls(HWND hDlg)
 static void CreateDiscoverTabControls(HWND hDlg)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    /* 说明文字 */
-    HWND hLbl = CreateWindowExW(0, L"STATIC",
-            L"广播查找接收器真实 IP (向 255.255.255.255:9200 发 GET_NET, 收集响应源 IP)",
-            WS_CHILD | WS_VISIBLE, 20, 14, 410, 28, hDlg, NULL, g_hInst, NULL);
-    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
     /* 开始/停止查找 按钮 */
     HWND hStart = CreateWindowExW(0, L"BUTTON", L"开始查找",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            20, 50, 120, 28, hDlg, (HMENU)(INT_PTR)IDC_DISC_START, g_hInst, NULL);
+            20, 20, 120, 28, hDlg, (HMENU)(INT_PTR)IDC_DISC_START, g_hInst, NULL);
     SendMessageW(hStart, WM_SETFONT, (WPARAM)hFont, TRUE);
     /* 复制选中 IP 按钮 */
     HWND hCopy = CreateWindowExW(0, L"BUTTON", L"复制选中 IP",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            150, 50, 120, 28, hDlg, (HMENU)(INT_PTR)IDC_DISC_COPY, g_hInst, NULL);
+            150, 20, 120, 28, hDlg, (HMENU)(INT_PTR)IDC_DISC_COPY, g_hInst, NULL);
     SendMessageW(hCopy, WM_SETFONT, (WPARAM)hFont, TRUE);
     /* 发现的 IP 列表 (LISTBOX, 支持单选) */
     HWND hList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP,
-            20, 90, 300, 180, hDlg, (HMENU)(INT_PTR)IDC_DISC_LIST, g_hInst, NULL);
+            20, 60, 300, 200, hDlg, (HMENU)(INT_PTR)IDC_DISC_LIST, g_hInst, NULL);
     SendMessageW(hList, WM_SETFONT, (WPARAM)hFont, TRUE);
 }
 
