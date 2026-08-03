@@ -1,8 +1,8 @@
 /*
  * 手柄-接收器工具 - Win32 GUI 应用
- * Tab1: 设备绑定 (手柄CAN扫描/连接 + 接收器UDP连接 + NRF读取比对 + 绑定)
- * Tab2: 手柄固件升级 (CAN)
- * Tab3: 接收器固件升级 (UDP)
+ * Tab1: 手柄绑定 (手柄CAN扫描/连接 + 接收器UDP连接 + NRF读取比对 + 绑定)
+ * Tab2: 手柄升级 (CAN)
+ * Tab3: 手柄接收端升级 (UDP)
  */
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -549,12 +549,18 @@ static void CreateTabLayout(HWND hWnd)
 
     /* 三个页签标题 */
     TCITEMW ti; ti.mask = TCIF_TEXT;
-    ti.pszText = (LPWSTR)L"设备绑定";
+    ti.pszText = (LPWSTR)L"手柄绑定";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&ti);
-    ti.pszText = (LPWSTR)L"手柄固件升级";
+    ti.pszText = (LPWSTR)L"手柄升级";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&ti);
-    ti.pszText = (LPWSTR)L"接收器固件升级";
+    ti.pszText = (LPWSTR)L"手柄接收端升级";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 2, (LPARAM)&ti);
+
+    /* Tab 标题字体: 系统默认是粗体 (菜单字体), 改为 Segoe UI 9pt 常规, 更清爽 */
+    HFONT hTabFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    SendMessageW(g_hTab, WM_SETFONT, (WPARAM)hTabFont, TRUE);
 
     /* 子对话框显示区: tab 下方 */
     RECT rcTab;
