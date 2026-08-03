@@ -54,10 +54,11 @@
 #define IDC_TFW_UPGRADE          1203
 #define IDC_TFW_VERSION          1204   /* 固件版本静态文本 */
 #define IDC_TFW_GETVER           1205   /* 获取版本按钮 */
-/* Tab3 网络参数设置 (SET_NET 0x12) */
+/* Tab3 网络参数设置 (SET_NET 0x12 / GET_NET 0x13) */
 #define IDC_NET_IP               1210   /* 设置用 IP 输入框 */
 #define IDC_NET_PORT             1211   /* 设置用 数据端口 输入框 */
 #define IDC_NET_APPLY            1212   /* 设置按钮 */
+#define IDC_NET_QUERY            1213   /* 查询按钮 */
 /* Tab4 设备查找 */
 #define IDC_DISC_START           1301   /* 开始/停止查找 按钮 */
 #define IDC_DISC_LIST            1302   /* 发现的 IP 列表 (LISTBOX) */
@@ -408,8 +409,12 @@ static void CreateTransmitterFwTabControls(HWND hDlg)
     SendMessageW(hNetPort, WM_SETFONT, (WPARAM)hFont, TRUE);
     HWND hApply = CreateWindowExW(0, L"BUTTON", L"设置",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            366, ny + 24, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_APPLY, g_hInst, NULL);
+            300, ny + 24, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_APPLY, g_hInst, NULL);
     SendMessageW(hApply, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hQuery = CreateWindowExW(0, L"BUTTON", L"查询",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            366, ny + 24, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_QUERY, g_hInst, NULL);
+    SendMessageW(hQuery, WM_SETFONT, (WPARAM)hFont, TRUE);
 }
 
 /* 创建 Tab4 设备查找控件: 开始/停止按钮 + IP 列表 + 复制按钮 */
@@ -777,6 +782,25 @@ static void OnNetApply(HWND hChildDlg)
     }
 }
 
+/* 查询接收器网络参数 (GET_NET 0x13): 回填 IP + 数据端口到输入框 */
+static void OnNetQuery(HWND hChildDlg)
+{
+    if (!g_udpConnected) {
+        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    char ip[16] = { 0 };
+    uint16_t port = 0;
+    if (UdpManager_GetNet(g_cfgUdp, ip, sizeof(ip), &port)) {
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_NET_IP), ip);
+        char port_str[8];
+        sprintf(port_str, "%d", port);
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_NET_PORT), port_str);
+    } else {
+        MessageBoxW(g_hMain, L"查询失败 (接收器未响应)", L"提示", MB_OK | MB_ICONWARNING);
+    }
+}
+
 /* 获取手柄 CAN 固件版本并显示 (Tab2). CAN 版本是 uint32: 高中低字节=主次补丁 */
 static void OnGetVersionCan(HWND hChildDlg)
 {
@@ -1076,6 +1100,7 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
             }
             break;
         case IDC_NET_APPLY:          OnNetApply(hChildDlg);    break;
+        case IDC_NET_QUERY:          OnNetQuery(hChildDlg);    break;
         case IDC_TFW_GETVER:         OnGetVersionUdp(hChildDlg); break;
         }
     } else if (tabIdx == 3) {
