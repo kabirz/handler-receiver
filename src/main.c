@@ -156,7 +156,7 @@ static void CreateBindTabControls(HWND hDlg)
     /* 设备下拉 (CBS_DROPDOWNLIST, 不可编辑) */
     HWND hDev = CreateWindowExW(0, L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
-            56, 28, 230, 200, hDlg, (HMENU)(INT_PTR)IDC_CAN_DEVICE, g_hInst, NULL);
+            56, 28, 115, 200, hDlg, (HMENU)(INT_PTR)IDC_CAN_DEVICE, g_hInst, NULL);
     SendMessageW(hDev, WM_SETFONT, (WPARAM)hFont, TRUE);
     /* 刷新 / 连接 按钮 */
     HWND hRefresh = CreateWindowExW(0, L"BUTTON", L"刷新",
@@ -177,22 +177,11 @@ static void CreateBindTabControls(HWND hDlg)
     hLbl = CreateWindowExW(0, L"STATIC", L"目标IP:",
             WS_CHILD | WS_VISIBLE, 20, 108, 44, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* IP 下拉 (CBS_DROPDOWN, 可编辑输入). 预填 255.255.255.255 (广播) + 各网卡广播地址 */
-    HWND hIp = CreateWindowExW(0, L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP,
-            66, 106, 220, 200, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
+    /* IP 输入框 (纯 EDIT, 用户手输). 默认 255.255.255.255 (广播) */
+    HWND hIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"255.255.255.255",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            66, 106, 110, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
     SendMessageW(hIp, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessageW(hIp, CB_ADDSTRING, 0, (LPARAM)L"255.255.255.255");
-    {
-        char baddrs[8][16];
-        int n = UdpManager_GetBroadcastAddrs(baddrs, 8);
-        for (int i = 0; i < n; i++) {
-            wchar_t wb[16];
-            MultiByteToWideChar(CP_ACP, 0, baddrs[i], -1, wb, 16);
-            SendMessageW(hIp, CB_ADDSTRING, 0, (LPARAM)wb);
-        }
-    }
-    SendMessageW(hIp, CB_SETCURSEL, 0, 0);  /* 默认选 255.255.255.255 */
     HWND hUdpConn = CreateWindowExW(0, L"BUTTON", L"连接",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, 106, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_CONNECT, g_hInst, NULL);
