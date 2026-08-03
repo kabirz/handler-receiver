@@ -205,7 +205,7 @@ static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
                 hDlg, (HMENU)(INT_PTR)version_id, g_hInst, NULL);
         SendMessageW(hVer, WM_SETFONT, (WPARAM)hFont, TRUE);
         HWND hGetVer = CreateWindowExW(0, L"BUTTON", L"获取版本",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
                 296, yPos + 54, 140, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
         SendMessageW(hGetVer, WM_SETFONT, (WPARAM)hFont, TRUE);
     }
@@ -254,7 +254,7 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
                 hDlg, (HMENU)(INT_PTR)version_id, g_hInst, NULL);
         SendMessageW(hVer, WM_SETFONT, (WPARAM)hFont, TRUE);
         HWND hGetVer = CreateWindowExW(0, L"BUTTON", L"获取版本",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
                 296, yPos + 54, 140, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
         SendMessageW(hGetVer, WM_SETFONT, (WPARAM)hFont, TRUE);
     }
@@ -272,10 +272,11 @@ static void SyncCanConnState(int canTabIdx)
     SetWindowTextW(GetDlgItem(h, IDC_CAN_CONNECT), connected ? L"断开" : L"连接");
     EnableWindow(GetDlgItem(h, IDC_CAN_DEVICE),  connected ? FALSE : TRUE);
     EnableWindow(GetDlgItem(h, IDC_CAN_REFRESH), connected ? FALSE : TRUE);
-    /* Tab2 升级按钮: 仅 UPGRADE tab, 条件=已连接+固件路径已选 */
+    /* Tab2 升级按钮 + 获取版本按钮: 仅 UPGRADE tab */
     if (canTabIdx == CAN_TAB_UPGRADE) {
         EnableWindow(GetDlgItem(h, IDC_HFW_UPGRADE),
                      connected && strlen(g_handlerFwPath) > 0 ? TRUE : FALSE);
+        EnableWindow(GetDlgItem(h, IDC_HFW_GETVER), connected ? TRUE : FALSE);
     }
 }
 
@@ -293,10 +294,11 @@ static void SyncUdpConnState(void)
         EnableWindow(GetDlgItem(h, IDC_UDP_IP), enable);
         EnableWindow(GetDlgItem(h, IDC_UDP_LOCAL_PORT), enable);
     }
-    /* Tab3 升级按钮启用条件: 已连接 + 固件路径已选 */
+    /* Tab3 升级按钮 + 获取版本按钮启用条件 */
     if (g_hTabDlg[2]) {
         EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_UPGRADE),
                      g_udpConnected && strlen(g_receiverFwPath) > 0 ? TRUE : FALSE);
+        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_GETVER), g_udpConnected ? TRUE : FALSE);
     }
 }
 
