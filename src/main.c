@@ -589,13 +589,12 @@ static DWORD WINAPI discover_thread(LPVOID param)
         return 0;
     }
 
-    /* 收集本机各网卡广播地址, 用于周期性发送广播 */
+    /* 收集本机各网卡广播地址, 发一次广播 GET_NET (0x13) */
     char baddrs[8][16];
     int bn = UdpManager_GetBroadcastAddrs(baddrs, 8);
     if (bn == 0) { strcpy(baddrs[0], "255.255.255.255"); bn = 1; }
 
     uint8_t pkt = UDP_CMD_GET_NET;   /* 0x13 */
-    /* 发送一次广播到各网卡 */
     for (int i = 0; i < bn; i++) {
         struct sockaddr_in dst;
         memset(&dst, 0, sizeof(dst));
@@ -605,28 +604,14 @@ static DWORD WINAPI discover_thread(LPVOID param)
         sendto(s, (const char *)&pkt, 1, 0, (struct sockaddr *)&dst, sizeof(dst));
     }
 
-    /* 接收窗口 10s, 每轮 select 等 500ms; 每 2s 重发一次广播 (覆盖响应慢/丢包).
-     * 取响应源 IP 去重上报. 用户可随时点"停止查找"提前结束 (g_discRunning=FALSE). */
+    /* 接收窗口 10s (只收不重发). 取响应源 IP 去重上报.
+     * 用户可随时点"停止查找"提前结束 (g_discRunning=FALSE). */
     time_t end = time(NULL) + 10;
-    time_t nextSend = time(NULL) + 2;   /* 下次重发时刻 */
     while (g_discRunning && time(NULL) < end) {
-        /* 到重发时刻: 再发一轮广播 */
-        if (time(NULL) >= nextSend) {
-            for (int i = 0; i < bn; i++) {
-                struct sockaddr_in dst;
-                memset(&dst, 0, sizeof(dst));
-                dst.sin_family = AF_INET;
-                dst.sin_port = htons(9200);
-                dst.sin_addr.s_addr = inet_addr(baddrs[i]);
-                sendto(s, (const char *)&pkt, 1, 0, (struct sockaddr *)&dst, sizeof(dst));
-            }
-            nextSend = time(NULL) + 2;
-        }
-
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(s, &rfds);
-        struct timeval tv = { 0, 500000 };  /* 500ms 一次, 兼顾及时停止与重发 */
+        struct timeval tv = { 0, 500000 };  /* 500ms 一次, 便于及时响应停止 */
         int r = select(0, &rfds, NULL, NULL, &tv);
         if (r <= 0) continue;
 
@@ -658,8 +643,7 @@ static void OnDiscoverStart(HWND hChildDlg)
         SetWindowTextW(GetDlgItem(hChildDlg, IDC_DISC_START), L"开始查找");
         return;
     }
-    /* 开始: 清空列表, 启动发现线程 */
-    SendMessageW(GetDlgItem(hChildDlg, IDC_DISC_LIST), LB_RESETCONTENT, 0, 0);
+    /* 开始查找: 不清空列表 (累积去重, 多次扫描同一 IP 只显示一次), 启动发现线程 */
     g_discRunning = TRUE;
     SetWindowTextW(GetDlgItem(hChildDlg, IDC_DISC_START), L"停止查找");
     CreateThread(NULL, 0, discover_thread, NULL, 0, NULL);
