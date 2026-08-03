@@ -39,6 +39,7 @@
 #define IDC_CAN_CONNECT          1003   /* 手柄: 连接/断开 按钮 */
 #define IDC_UDP_IP               1004   /* 接收器: 目标 IP (CBS_DROPDOWN) */
 #define IDC_UDP_CONNECT          1005   /* 接收器: 连接/断开 按钮 */
+#define IDC_UDP_LOCAL_PORT       1010   /* 接收器: 本地端口 (bind, 默认 9201) */
 #define IDC_BTN_CHECK_BIND       1006   /* 检测绑定状态 */
 #define IDC_BTN_BIND             1007   /* 绑定设备 */
 /* Tab2 手柄固件升级 */
@@ -231,6 +232,14 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
             66, yPos + 22, 110, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
     SendMessageW(hIp, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 本地端口 (bind, 默认 9201). 固件监听 9200, 上位机本地 9201 收广播 */
+    HWND hLpLbl = CreateWindowExW(0, L"STATIC", L"本地端口:",
+            WS_CHILD | WS_VISIBLE, 186, yPos + 24, 56, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLpLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hLocalPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"9201",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            244, yPos + 22, 50, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_LOCAL_PORT, g_hInst, NULL);
+    SendMessageW(hLocalPort, WM_SETFONT, (WPARAM)hFont, TRUE);
     HWND hUdpConn = CreateWindowExW(0, L"BUTTON", L"连接",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_CONNECT, g_hInst, NULL);
@@ -282,6 +291,7 @@ static void SyncUdpConnState(void)
         if (!h) continue;
         SetWindowTextW(GetDlgItem(h, IDC_UDP_CONNECT), text);
         EnableWindow(GetDlgItem(h, IDC_UDP_IP), enable);
+        EnableWindow(GetDlgItem(h, IDC_UDP_LOCAL_PORT), enable);
     }
     /* Tab3 升级按钮启用条件: 已连接 + 固件路径已选 */
     if (g_hTabDlg[2]) {
@@ -545,13 +555,17 @@ static void OnUdpConnect(HWND hChildDlg)
                     MB_OK | MB_ICONWARNING);
         return;
     }
-    /* 本地 9201, 远程 9200, 单播到指定 IP */
-    if (!UdpManager_Bind(g_cfgUdp, UDP_CHAN_CONFIG, 9201, ip, 9200)) {
+    /* 读本地端口 (默认 9201). 远程固定 9200 (配置端口), 单播到指定 IP */
+    wchar_t wlp[16] = { 0 };
+    GetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_LOCAL_PORT), wlp, 16);
+    int local_port = _wtoi(wlp);
+    if (local_port <= 0 || local_port > 65535) local_port = 9201;
+    if (!UdpManager_Bind(g_cfgUdp, UDP_CHAN_CONFIG, (uint16_t)local_port, ip, 9200)) {
         int err = WSAGetLastError();
-        wchar_t wmsg[160];
-        swprintf(wmsg, 160,
-            L"接收器连接失败\n本地端口 9201 可能被占用 (WSA 错误码: %d)\n请关闭占用该端口的程序后重试",
-            err);
+        wchar_t wmsg[200];
+        swprintf(wmsg, 200,
+            L"接收器连接失败\n本地端口 %d 可能被占用 (WSA 错误码: %d)\n请更换本地端口或关闭占用该端口的程序",
+            local_port, err);
         MessageBoxW(g_hMain, wmsg, L"连接失败", MB_OK | MB_ICONERROR);
         return;
     }
