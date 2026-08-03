@@ -44,10 +44,14 @@
 #define IDC_HFW_FILE             1101
 #define IDC_HFW_BROWSE           1102
 #define IDC_HFW_UPGRADE          1103
+#define IDC_HFW_VERSION          1104   /* 固件版本静态文本 */
+#define IDC_HFW_GETVER           1105   /* 获取版本按钮 */
 /* Tab3 接收器固件升级 */
 #define IDC_TFW_FILE             1201
 #define IDC_TFW_BROWSE           1202
 #define IDC_TFW_UPGRADE          1203
+#define IDC_TFW_VERSION          1204   /* 固件版本静态文本 */
+#define IDC_TFW_GETVER           1205   /* 获取版本按钮 */
 /* Tab3 网络参数设置 (SET_NET 0x12) */
 #define IDC_NET_IP               1210   /* 设置用 IP 输入框 */
 #define IDC_NET_PORT             1211   /* 设置用 数据端口 输入框 */
@@ -163,14 +167,17 @@ static void RefreshCanDevices(HWND hCombo, int tabIdx)
 }
 
 /* 创建手柄 CAN 连接 groupbox (设备下拉 + 刷新 + 连接, 固定 250K).
- * yPos = groupbox 顶部 y 坐标. 控件 ID 三 tab 复用 (各 tab 是独立子对话框, ID 不冲突).
+ * yPos = groupbox 顶部 y 坐标. 控件 ID 各 tab 复用 (各 tab 是独立子对话框, ID 不冲突).
+ * version_id/getver_id < 0 时不显示版本行 (Tab1 不需要).
  * 返回 groupbox 占用的总高度 (含间距). */
-static int CreateCanGroupBox(HWND hDlg, int yPos)
+static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    BOOL showVer = (version_id > 0 && getver_id > 0);
+    int boxH = showVer ? 96 : 70;   /* 有版本行时加高 */
     CreateWindowExW(0, L"BUTTON", L"手柄 (CAN, 250K)",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, yPos, 436, 70, hDlg, NULL, g_hInst, NULL);
+            10, yPos, 436, boxH, hDlg, NULL, g_hInst, NULL);
     HWND hLbl = CreateWindowExW(0, L"STATIC", L"设备:",
             WS_CHILD | WS_VISIBLE, 20, yPos + 24, 36, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -186,20 +193,36 @@ static int CreateCanGroupBox(HWND hDlg, int yPos)
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_CONNECT, g_hInst, NULL);
     SendMessageW(hCanConn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 版本行 (可选): "固件版本: xxx" + "获取版本" 按钮 */
+    if (showVer) {
+        HWND hvLbl = CreateWindowExW(0, L"STATIC", L"固件版本:",
+                WS_CHILD | WS_VISIBLE, 20, yPos + 56, 52, 14, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hvLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hVer = CreateWindowExW(0, L"STATIC", L"未知",
+                WS_CHILD | WS_VISIBLE, 72, yPos + 56, 160, 14,
+                hDlg, (HMENU)(INT_PTR)version_id, g_hInst, NULL);
+        SendMessageW(hVer, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hGetVer = CreateWindowExW(0, L"BUTTON", L"获取版本",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                296, yPos + 54, 140, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
+        SendMessageW(hGetVer, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
     /* 预填设备列表: tabIdx 来自子对话框 GWLP_USERDATA (Tab1=0, Tab2=1, 对应 CAN_TAB_*) */
     int tabIdx = (int)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
     RefreshCanDevices(hDev, tabIdx);
-    return 78;  /* groupbox 高 70 + 8 间距 */
+    return boxH + 8;  /* groupbox 高 + 8 间距 */
 }
 
 /* 创建接收器 UDP 连接 groupbox (目标 IP + 连接, 配置端口固定 9200).
- * 返回 groupbox 占用的总高度. */
-static int CreateUdpGroupBox(HWND hDlg, int yPos)
+ * version_id/getver_id < 0 时不显示版本行. 返回 groupbox 占用的总高度. */
+static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    BOOL showVer = (version_id > 0 && getver_id > 0);
+    int boxH = showVer ? 96 : 70;
     CreateWindowExW(0, L"BUTTON", L"接收器 (UDP)",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, yPos, 436, 70, hDlg, NULL, g_hInst, NULL);
+            10, yPos, 436, boxH, hDlg, NULL, g_hInst, NULL);
     HWND hLbl = CreateWindowExW(0, L"STATIC", L"目标IP:",
             WS_CHILD | WS_VISIBLE, 20, yPos + 24, 44, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -211,7 +234,21 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos)
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_CONNECT, g_hInst, NULL);
     SendMessageW(hUdpConn, WM_SETFONT, (WPARAM)hFont, TRUE);
-    return 78;
+    /* 版本行 (可选) */
+    if (showVer) {
+        HWND hvLbl = CreateWindowExW(0, L"STATIC", L"固件版本:",
+                WS_CHILD | WS_VISIBLE, 20, yPos + 56, 52, 14, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hvLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hVer = CreateWindowExW(0, L"STATIC", L"未知",
+                WS_CHILD | WS_VISIBLE, 72, yPos + 56, 160, 14,
+                hDlg, (HMENU)(INT_PTR)version_id, g_hInst, NULL);
+        SendMessageW(hVer, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hGetVer = CreateWindowExW(0, L"BUTTON", L"获取版本",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                296, yPos + 54, 140, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
+        SendMessageW(hGetVer, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
+    return boxH + 8;
 }
 
 /* 同步指定 CAN tab 的连接状态到 UI (按钮文字/控件禁用).
@@ -257,8 +294,8 @@ static void CreateBindTabControls(HWND hDlg)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     int y = 6;
-    y += CreateCanGroupBox(hDlg, y);    /* 手柄 CAN 区 */
-    y += CreateUdpGroupBox(hDlg, y);    /* 接收器 UDP 区 */
+    y += CreateCanGroupBox(hDlg, y, -1, -1);    /* 手柄 CAN 区 (Tab1 无版本行) */
+    y += CreateUdpGroupBox(hDlg, y, -1, -1);    /* 接收器 UDP 区 (Tab1 无版本行) */
 
     /* ===== 操作按钮: 检测绑定状态 / 绑定设备 ===== */
     struct { const wchar_t *text; int id; } btns[] = {
@@ -298,23 +335,23 @@ static void CreateFwTabControls(HWND hDlg, int file_id, int browse_id, int upgra
 
 static void CreateHandlerFwTabControls(HWND hDlg)
 {
-    /* Tab2: 顶部 CAN 连接 groupbox + 下方固件升级区 */
+    /* Tab2: CAN 连接 groupbox (带版本行) + 下方固件升级区 */
     int y = 6;
-    y += CreateCanGroupBox(hDlg, y);
+    y += CreateCanGroupBox(hDlg, y, IDC_HFW_VERSION, IDC_HFW_GETVER);
     CreateFwTabControls(hDlg, IDC_HFW_FILE, IDC_HFW_BROWSE, IDC_HFW_UPGRADE, y + 4);
 }
 
 static void CreateTransmitterFwTabControls(HWND hDlg)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    /* Tab3: UDP 连接 groupbox + 固件升级区 + 网络参数设置区 */
+    /* Tab3: UDP 连接 groupbox (带版本行, y=6→104) + 固件升级区 + 网络参数设置区 */
     int y = 6;
-    y += CreateUdpGroupBox(hDlg, y);       /* UDP 连接 (y=6→84) */
-    CreateFwTabControls(hDlg, IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE, y + 4);  /* 固件区 (y≈88) */
+    y += CreateUdpGroupBox(hDlg, y, IDC_TFW_VERSION, IDC_TFW_GETVER);  /* y=6→104 */
+    CreateFwTabControls(hDlg, IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE, y + 4);  /* 固件区 (y≈108) */
 
     /* 网络参数 groupbox: 设置接收器 IP + 数据端口 (SET_NET 0x12).
      * 掩码固定 255.255.255.0, 网关=IP 末段改 1, 固件自算, 不传. */
-    int ny = 178;
+    int ny = 198;  /* 固件区 (~108) + 固件区高 (~80) + 间距 */
     CreateWindowExW(0, L"BUTTON", L"网络参数 (写入选器)",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, ny, 436, 70, hDlg, NULL, g_hInst, NULL);
@@ -407,6 +444,10 @@ static BOOL ReadHandlerNrf(void)
     return FALSE;
 }
 
+/* 前向声明: 连接成功后自动读版本, 定义在后面 */
+static void OnGetVersionCan(HWND hChildDlg);
+static void OnGetVersionUdp(HWND hChildDlg);
+
 /* CAN 连接/断开 (各 tab 独立). hChildDlg 的 GWLP_USERDATA 给出 tab 索引.
  * Tab1(0)→CAN_TAB_BIND, Tab2(1)→CAN_TAB_UPGRADE. 失败友好提示占用原因. */
 static void OnCanConnect(HWND hChildDlg)
@@ -471,6 +512,10 @@ static void OnCanConnect(HWND hChildDlg)
     CanManager_StartRxThread(g_canTab[canTabIdx]);
     g_canTabChannel[canTabIdx] = channel;
     SyncCanConnState(canTabIdx);
+    /* 升级 tab 连接成功后自动读版本 (BIND tab 无版本行) */
+    if (canTabIdx == CAN_TAB_UPGRADE) {
+        OnGetVersionCan(hChildDlg);
+    }
 }
 
 /* 接收器连接/断开 (从 IP 框取目标 IP, 配置端口固定 9200). 已连接则断开. */
@@ -517,6 +562,10 @@ static void OnUdpConnect(HWND hChildDlg)
     UdpManager_StartRxThread(g_cfgUdp);
     g_udpConnected = 1;
     SyncUdpConnState();
+    /* Tab3 连接成功后自动读版本 (Tab1 无版本控件, GetDlgItem 返回 NULL 自动跳过) */
+    if (GetDlgItem(hChildDlg, IDC_TFW_VERSION)) {
+        OnGetVersionUdp(hChildDlg);
+    }
 }
 
 /* ===== Tab4 设备查找: 原生 winsock 广播 GET_NET 收集响应源 IP =====
@@ -660,6 +709,41 @@ static void OnNetApply(HWND hChildDlg)
                     MB_OK | MB_ICONINFORMATION);
     } else {
         MessageBoxW(g_hMain, L"设置失败 (发送命令失败)", L"错误", MB_OK | MB_ICONERROR);
+    }
+}
+
+/* 获取手柄 CAN 固件版本并显示 (Tab2). CAN 版本是 uint32: 高中低字节=主次补丁 */
+static void OnGetVersionCan(HWND hChildDlg)
+{
+    if (g_canTabChannel[CAN_TAB_UPGRADE] < 0) {
+        MessageBoxW(g_hMain, L"请先连接手柄", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    uint32_t ver = 0;
+    if (CanManager_GetVersion(g_canTab[CAN_TAB_UPGRADE], &ver)) {
+        wchar_t vstr[32];
+        swprintf(vstr, 32, L"%d.%d.%d",
+                 (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
+        SetWindowTextW(GetDlgItem(hChildDlg, IDC_HFW_VERSION), vstr);
+    } else {
+        SetWindowTextW(GetDlgItem(hChildDlg, IDC_HFW_VERSION), L"读取失败");
+    }
+}
+
+/* 获取接收器 UDP 固件版本并显示 (Tab3). UDP 版本是字符串 (如 "0.1.0-dev") */
+static void OnGetVersionUdp(HWND hChildDlg)
+{
+    if (!g_udpConnected) {
+        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    char ver[64] = { 0 };
+    if (UdpManager_GetVersion(g_cfgUdp, ver, sizeof(ver))) {
+        wchar_t wver[64];
+        MultiByteToWideChar(CP_ACP, 0, ver, -1, wver, 64);
+        SetWindowTextW(GetDlgItem(hChildDlg, IDC_TFW_VERSION), wver);
+    } else {
+        SetWindowTextW(GetDlgItem(hChildDlg, IDC_TFW_VERSION), L"读取失败");
     }
 }
 
@@ -890,6 +974,7 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
                             MB_OK | MB_ICONWARNING);
             }
             break;
+        case IDC_HFW_GETVER:          OnGetVersionCan(hChildDlg); break;
         }
     } else if (tabIdx == 2) {
         /* 接收器固件升级页 (UDP) */
@@ -925,7 +1010,8 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
                             MB_OK | MB_ICONWARNING);
             }
             break;
-        case IDC_NET_APPLY:          OnNetApply(hChildDlg); break;
+        case IDC_NET_APPLY:          OnNetApply(hChildDlg);    break;
+        case IDC_TFW_GETVER:         OnGetVersionUdp(hChildDlg); break;
         }
     } else if (tabIdx == 3) {
         /* 设备查找页 (Tab4) */
@@ -994,12 +1080,22 @@ static LRESULT CALLBACK ProgressWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPAR
         if (LOWORD(wParam) == IDC_PROG_BTN) {
             if (g_progressDone) DestroyWindow(hDlg);
         } else if (LOWORD(wParam) == IDC_PROG_REBOOT) {
+            /* 发重启命令 (CAN 升级走 UPGRADE tab 的 CanManager, UDP 走 g_cfgUdp).
+             * 重启后设备会断开重连, 旧连接失效 → 提示用户约 30s 后手动重连+读版本确认 */
             if (g_progressIsCan) {
                 if (g_canTab[CAN_TAB_UPGRADE]) CanManager_Reboot(g_canTab[CAN_TAB_UPGRADE]);
             } else {
                 if (g_cfgUdp) UdpManager_Reboot(g_cfgUdp);
             }
             DestroyWindow(hDlg);
+            MessageBoxW(g_hMain,
+                L"重启命令已发送\n\n"
+                L"设备重启约需 30 秒, 期间连接会断开。\n"
+                L"请等待约 30 秒后:\n"
+                L"  1. 重新点「连接」\n"
+                L"  2. 点「获取版本」确认设备已恢复\n\n"
+                L"(版本号变化说明升级已生效)",
+                L"重启中", MB_OK | MB_ICONINFORMATION);
         }
         return 0;
     case WM_CLOSE:

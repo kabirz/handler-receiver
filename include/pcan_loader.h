@@ -11,7 +11,7 @@ typedef uint32_t TPCANStatus;
 
 /* PCAN 状态码 (仅列举本工具用到的) */
 #define PCAN_ERROR_OK           0x00000
-#define PCAN_ERROR_XMTFULL     0x00001
+#define PCAN_ERROR_XMTFULL      0x00001
 #define PCAN_ERROR_OVERRUN      0x00002
 #define PCAN_ERROR_BUSLIGHT     0x00004
 #define PCAN_ERROR_BUSPASSIVE   0x00400
