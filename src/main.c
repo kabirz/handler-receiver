@@ -194,13 +194,13 @@ static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_CONNECT, g_hInst, NULL);
     SendMessageW(hCanConn, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 版本行 (可选): "固件版本: xxx" + "获取版本" 按钮 */
+    /* 版本行 (可选): "固件版本: xxx" + "获取版本" 按钮. 标签加宽避免被裁 */
     if (showVer) {
         HWND hvLbl = CreateWindowExW(0, L"STATIC", L"固件版本:",
-                WS_CHILD | WS_VISIBLE, 20, yPos + 56, 52, 14, hDlg, NULL, g_hInst, NULL);
+                WS_CHILD | WS_VISIBLE, 20, yPos + 56, 64, 14, hDlg, NULL, g_hInst, NULL);
         SendMessageW(hvLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
         HWND hVer = CreateWindowExW(0, L"STATIC", L"未知",
-                WS_CHILD | WS_VISIBLE, 72, yPos + 56, 160, 14,
+                WS_CHILD | WS_VISIBLE, 84, yPos + 56, 200, 14,
                 hDlg, (HMENU)(INT_PTR)version_id, g_hInst, NULL);
         SendMessageW(hVer, WM_SETFONT, (WPARAM)hFont, TRUE);
         HWND hGetVer = CreateWindowExW(0, L"BUTTON", L"获取版本",
@@ -235,13 +235,13 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_CONNECT, g_hInst, NULL);
     SendMessageW(hUdpConn, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 版本行 (可选) */
+    /* 版本行 (可选). 标签加宽避免被裁 */
     if (showVer) {
         HWND hvLbl = CreateWindowExW(0, L"STATIC", L"固件版本:",
-                WS_CHILD | WS_VISIBLE, 20, yPos + 56, 52, 14, hDlg, NULL, g_hInst, NULL);
+                WS_CHILD | WS_VISIBLE, 20, yPos + 56, 64, 14, hDlg, NULL, g_hInst, NULL);
         SendMessageW(hvLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
         HWND hVer = CreateWindowExW(0, L"STATIC", L"未知",
-                WS_CHILD | WS_VISIBLE, 72, yPos + 56, 160, 14,
+                WS_CHILD | WS_VISIBLE, 84, yPos + 56, 200, 14,
                 hDlg, (HMENU)(INT_PTR)version_id, g_hInst, NULL);
         SendMessageW(hVer, WM_SETFONT, (WPARAM)hFont, TRUE);
         HWND hGetVer = CreateWindowExW(0, L"BUTTON", L"获取版本",
