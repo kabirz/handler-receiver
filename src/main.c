@@ -353,7 +353,7 @@ static void CreateTransmitterFwTabControls(HWND hDlg)
     /* 网络参数 groupbox: 设置接收器 IP + 数据端口 (SET_NET 0x12).
      * 掩码固定 255.255.255.0, 网关=IP 末段改 1, 固件自算, 不传. */
     int ny = 198;  /* 固件区 (~108) + 固件区高 (~80) + 间距 */
-    CreateWindowExW(0, L"BUTTON", L"网络参数 (写入选器)",
+    CreateWindowExW(0, L"BUTTON", L"网络参数",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, ny, 436, 70, hDlg, NULL, g_hInst, NULL);
     HWND hLbl = CreateWindowExW(0, L"STATIC", L"IP:",
@@ -361,14 +361,14 @@ static void CreateTransmitterFwTabControls(HWND hDlg)
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
     HWND hNetIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            46, ny + 24, 120, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_IP, g_hInst, NULL);
+            46, ny + 24, 110, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_IP, g_hInst, NULL);
     SendMessageW(hNetIp, WM_SETFONT, (WPARAM)hFont, TRUE);
     hLbl = CreateWindowExW(0, L"STATIC", L"数据端口:",
-            WS_CHILD | WS_VISIBLE, 176, ny + 26, 52, 14, hDlg, NULL, g_hInst, NULL);
+            WS_CHILD | WS_VISIBLE, 166, ny + 26, 64, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
     HWND hNetPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            230, ny + 24, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_PORT, g_hInst, NULL);
+            234, ny + 24, 56, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_PORT, g_hInst, NULL);
     SendMessageW(hNetPort, WM_SETFONT, (WPARAM)hFont, TRUE);
     HWND hApply = CreateWindowExW(0, L"BUTTON", L"设置",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
