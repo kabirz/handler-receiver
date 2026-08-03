@@ -518,15 +518,27 @@ static void OnCanConnect(HWND hChildDlg)
     CanManager_StartRxThread(g_canTab[canTabIdx]);
     g_canTabChannel[canTabIdx] = channel;
     SyncCanConnState(canTabIdx);
-    /* 升级 tab 连接成功后自动读版本 (BIND tab 无版本行) */
     if (canTabIdx == CAN_TAB_UPGRADE) {
+        /* 升级 tab 连接成功后自动读版本 */
         OnGetVersionCan(hChildDlg);
+    } else if (canTabIdx == CAN_TAB_BIND) {
+        /* 绑定 tab 连接后验证设备响应: 读 NRF (0x104 GET_CONFIG). 无响应=连接无效, 自动断开 */
+        if (!ReadHandlerNrf()) {
+            MessageBoxW(g_hMain,
+                L"手柄连接成功但无响应 (读取 NRF 超时)\n"
+                L"请确认设备已上电且为手柄设备",
+                L"连接失败", MB_OK | MB_ICONERROR);
+            CanManager_Disconnect(g_canTab[CAN_TAB_BIND]);
+            g_canTabChannel[CAN_TAB_BIND] = -1;
+            SyncCanConnState(CAN_TAB_BIND);
+        }
     }
 }
 
 /* 接收器连接/断开 (从 IP 框取目标 IP, 配置端口固定 9200). 已连接则断开. */
 static void OnUdpConnect(HWND hChildDlg)
 {
+    int tabIdx = (int)GetWindowLongPtrW(hChildDlg, GWLP_USERDATA);
     if (g_udpConnected) {
         /* 断开 */
         UdpManager_Unbind(g_cfgUdp);
@@ -572,8 +584,20 @@ static void OnUdpConnect(HWND hChildDlg)
     UdpManager_StartRxThread(g_cfgUdp);
     g_udpConnected = 1;
     SyncUdpConnState();
-    /* Tab3 连接成功后自动读版本 (Tab1 无版本控件, GetDlgItem 返回 NULL 自动跳过) */
-    if (GetDlgItem(hChildDlg, IDC_TFW_VERSION)) {
+    if (tabIdx == 0) {
+        /* 绑定 tab (Tab1) 连接后验证设备响应: 读 NRF (GET_RF24). 无响应=连接无效, 自动断开 */
+        uint8_t ch, addr[5];
+        if (!UdpManager_GetRF24(g_cfgUdp, &ch, addr)) {
+            MessageBoxW(g_hMain,
+                L"接收器连接成功但无响应 (读取 NRF 超时)\n"
+                L"请确认 IP 正确且接收器已上电",
+                L"连接失败", MB_OK | MB_ICONERROR);
+            UdpManager_Unbind(g_cfgUdp);
+            g_udpConnected = 0;
+            SyncUdpConnState();
+        }
+    } else if (GetDlgItem(hChildDlg, IDC_TFW_VERSION)) {
+        /* Tab3 连接成功后自动读版本 */
         OnGetVersionUdp(hChildDlg);
     }
 }
