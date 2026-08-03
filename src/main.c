@@ -169,14 +169,18 @@ static void RefreshCanDevices(HWND hCombo, int tabIdx)
 }
 
 /* 创建手柄 CAN 连接 groupbox (设备下拉 + 刷新 + 连接, 固定 250K).
- * yPos = groupbox 顶部 y 坐标. 控件 ID 各 tab 复用 (各 tab 是独立子对话框, ID 不冲突).
- * version_id/getver_id < 0 时不显示版本行 (Tab1 不需要).
+ * version_id/getver_id < 0 时不显示版本行; fw_*_id > 0 时在版本行下方显示固件区 (内嵌).
  * 返回 groupbox 占用的总高度 (含间距). */
-static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
+static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
+                             int fw_file_id, int fw_browse_id, int fw_upgrade_id)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     BOOL showVer = (version_id > 0 && getver_id > 0);
-    int boxH = showVer ? 96 : 70;   /* 有版本行时加高 */
+    BOOL showFw = (fw_file_id > 0 && fw_browse_id > 0 && fw_upgrade_id > 0);
+    /* groupbox 高度: 基础(连接行)70 + 版本行26 + 固件区86 */
+    int boxH = 70;
+    if (showVer) boxH += 26;
+    if (showFw) boxH += 86;
     CreateWindowExW(0, L"BUTTON", L"手柄 (CAN, 250K)",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, yPos, 436, boxH, hDlg, NULL, g_hInst, NULL);
@@ -195,7 +199,7 @@ static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_CONNECT, g_hInst, NULL);
     SendMessageW(hCanConn, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 版本行 (可选): "固件版本: xxx" + "获取版本" 按钮. 标签加宽避免被裁 */
+    /* 版本行 (可选): "固件版本: xxx" + "获取版本" 按钮 */
     if (showVer) {
         HWND hvLbl = CreateWindowExW(0, L"STATIC", L"固件版本:",
                 WS_CHILD | WS_VISIBLE, 20, yPos + 56, 64, 14, hDlg, NULL, g_hInst, NULL);
@@ -209,6 +213,25 @@ static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
                 296, yPos + 54, 140, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
         SendMessageW(hGetVer, WM_SETFONT, (WPARAM)hFont, TRUE);
     }
+    /* 固件区 (可选, 内嵌 groupbox): 文件路径 + 浏览 + 升级. 紧跟版本行下方 */
+    if (showFw) {
+        int fy = yPos + (showVer ? 88 : 56);  /* 无版本行时上移 */
+        HWND hFLbl = CreateWindowExW(0, L"STATIC", L"固件文件:",
+                WS_CHILD | WS_VISIBLE, 20, fy + 4, 60, 16, hDlg, NULL, g_hInst, NULL);
+        HWND hFile = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+                80, fy + 2, 260, 22, hDlg, (HMENU)(INT_PTR)fw_file_id, g_hInst, NULL);
+        HWND hBrowse = CreateWindowExW(0, L"BUTTON", L"浏览...",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                350, fy + 2, 60, 22, hDlg, (HMENU)(INT_PTR)fw_browse_id, g_hInst, NULL);
+        HWND hUpg = CreateWindowExW(0, L"BUTTON", L"升级",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+                180, fy + 40, 80, 28, hDlg, (HMENU)(INT_PTR)fw_upgrade_id, g_hInst, NULL);
+        SendMessageW(hFLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessageW(hFile,  WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessageW(hBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessageW(hUpg,   WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
     /* 预填设备列表: tabIdx 来自子对话框 GWLP_USERDATA (Tab1=0, Tab2=1, 对应 CAN_TAB_*) */
     int tabIdx = (int)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
     RefreshCanDevices(hDev, tabIdx);
@@ -216,12 +239,17 @@ static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
 }
 
 /* 创建接收器 UDP 连接 groupbox (目标 IP + 连接, 配置端口固定 9200).
- * version_id/getver_id < 0 时不显示版本行. 返回 groupbox 占用的总高度. */
-static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
+ * version_id/getver_id < 0 时不显示版本行; fw_*_id > 0 时在版本行下方显示固件区 (内嵌).
+ * 返回 groupbox 占用的总高度. */
+static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
+                             int fw_file_id, int fw_browse_id, int fw_upgrade_id)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     BOOL showVer = (version_id > 0 && getver_id > 0);
-    int boxH = showVer ? 96 : 70;
+    BOOL showFw = (fw_file_id > 0 && fw_browse_id > 0 && fw_upgrade_id > 0);
+    int boxH = 70;
+    if (showVer) boxH += 26;
+    if (showFw) boxH += 86;
     CreateWindowExW(0, L"BUTTON", L"接收器 (UDP)",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, yPos, 436, boxH, hDlg, NULL, g_hInst, NULL);
@@ -257,6 +285,25 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id)
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
                 296, yPos + 54, 140, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
         SendMessageW(hGetVer, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
+    /* 固件区 (可选, 内嵌 groupbox) */
+    if (showFw) {
+        int fy = yPos + (showVer ? 88 : 56);
+        HWND hFLbl = CreateWindowExW(0, L"STATIC", L"固件文件:",
+                WS_CHILD | WS_VISIBLE, 20, fy + 4, 60, 16, hDlg, NULL, g_hInst, NULL);
+        HWND hFile = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+                80, fy + 2, 260, 22, hDlg, (HMENU)(INT_PTR)fw_file_id, g_hInst, NULL);
+        HWND hBrowse = CreateWindowExW(0, L"BUTTON", L"浏览...",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                350, fy + 2, 60, 22, hDlg, (HMENU)(INT_PTR)fw_browse_id, g_hInst, NULL);
+        HWND hUpg = CreateWindowExW(0, L"BUTTON", L"升级",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+                180, fy + 40, 80, 28, hDlg, (HMENU)(INT_PTR)fw_upgrade_id, g_hInst, NULL);
+        SendMessageW(hFLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessageW(hFile,  WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessageW(hBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessageW(hUpg,   WM_SETFONT, (WPARAM)hFont, TRUE);
     }
     return boxH + 8;
 }
@@ -307,8 +354,8 @@ static void CreateBindTabControls(HWND hDlg)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     int y = 6;
-    y += CreateCanGroupBox(hDlg, y, -1, -1);    /* 手柄 CAN 区 (Tab1 无版本行) */
-    y += CreateUdpGroupBox(hDlg, y, -1, -1);    /* 接收器 UDP 区 (Tab1 无版本行) */
+    y += CreateCanGroupBox(hDlg, y, -1, -1, -1, -1, -1);    /* Tab1 CAN (无版本/无固件区) */
+    y += CreateUdpGroupBox(hDlg, y, -1, -1, -1, -1, -1);    /* Tab1 UDP (无版本/无固件区) */
 
     /* ===== 操作按钮: 检测绑定状态 / 绑定设备 ===== */
     struct { const wchar_t *text; int id; } btns[] = {
@@ -324,47 +371,24 @@ static void CreateBindTabControls(HWND hDlg)
     }
 }
 
-/* 通用: 创建 升级 tab 的 [路径框 + 浏览 + 升级] 三件套. yPos = 固件区顶部 y 坐标 */
-static void CreateFwTabControls(HWND hDlg, int file_id, int browse_id, int upgrade_id, int yPos)
-{
-    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    HWND hLabel = CreateWindowExW(0, L"STATIC", L"固件文件:",
-            WS_CHILD | WS_VISIBLE, 20, yPos + 4, 60, 16,
-            hDlg, NULL, g_hInst, NULL);
-    HWND hFile = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-            80, yPos + 2, 260, 22, hDlg, (HMENU)(INT_PTR)file_id, g_hInst, NULL);
-    HWND hBrowse = CreateWindowExW(0, L"BUTTON", L"浏览...",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            350, yPos + 2, 60, 22, hDlg, (HMENU)(INT_PTR)browse_id, g_hInst, NULL);
-    HWND hUpg = CreateWindowExW(0, L"BUTTON", L"升级",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-            180, yPos + 42, 80, 28, hDlg, (HMENU)(INT_PTR)upgrade_id, g_hInst, NULL);
-    SendMessageW(hLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessageW(hFile,  WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessageW(hBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessageW(hUpg,   WM_SETFONT, (WPARAM)hFont, TRUE);
-}
-
 static void CreateHandlerFwTabControls(HWND hDlg)
 {
-    /* Tab2: CAN 连接 groupbox (带版本行) + 下方固件升级区 */
-    int y = 6;
-    y += CreateCanGroupBox(hDlg, y, IDC_HFW_VERSION, IDC_HFW_GETVER);
-    CreateFwTabControls(hDlg, IDC_HFW_FILE, IDC_HFW_BROWSE, IDC_HFW_UPGRADE, y + 4);
+    /* Tab2: 一个 CAN groupbox 包含 连接+版本+固件区 */
+    CreateCanGroupBox(hDlg, 6, IDC_HFW_VERSION, IDC_HFW_GETVER,
+                      IDC_HFW_FILE, IDC_HFW_BROWSE, IDC_HFW_UPGRADE);
 }
 
 static void CreateTransmitterFwTabControls(HWND hDlg)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    /* Tab3: UDP 连接 groupbox (带版本行, y=6→104) + 固件升级区 + 网络参数设置区 */
+    /* Tab3: 一个 UDP groupbox 包含 连接+版本+固件区, 下方独立网络参数区 */
     int y = 6;
-    y += CreateUdpGroupBox(hDlg, y, IDC_TFW_VERSION, IDC_TFW_GETVER);  /* y=6→104 */
-    CreateFwTabControls(hDlg, IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE, y + 4);  /* 固件区 (y≈108) */
+    y += CreateUdpGroupBox(hDlg, y, IDC_TFW_VERSION, IDC_TFW_GETVER,
+                           IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE);  /* y=6→196 */
 
     /* 网络参数 groupbox: 设置接收器 IP + 数据端口 (SET_NET 0x12).
      * 掩码固定 255.255.255.0, 网关=IP 末段改 1, 固件自算, 不传. */
-    int ny = 198;  /* 固件区 (~108) + 固件区高 (~80) + 间距 */
+    int ny = y;  /* 紧接 UDP groupbox 下方 */
     CreateWindowExW(0, L"BUTTON", L"网络参数",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, ny, 436, 70, hDlg, NULL, g_hInst, NULL);
