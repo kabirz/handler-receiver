@@ -520,7 +520,7 @@ static void OnCanConnect(HWND hChildDlg)
     if (canTabIdx == CAN_TAB_BIND) {
         if (!ReadHandlerNrf()) {
             MessageBoxW(g_hMain,
-                L"连接失败: 读取手柄 NRF 超时\n"
+                L"连接失败\n"
                 L"请确认设备已上电且为手柄设备",
                 L"连接失败", MB_OK | MB_ICONERROR);
             CanManager_Disconnect(g_canTab[CAN_TAB_BIND]);
@@ -588,7 +588,7 @@ static void OnUdpConnect(HWND hChildDlg)
         uint8_t ch, addr[5];
         if (!UdpManager_GetRF24(g_cfgUdp, &ch, addr)) {
             MessageBoxW(g_hMain,
-                L"连接失败: 读取接收器 NRF 超时\n"
+                L"连接失败\n"
                 L"请确认 IP 正确且接收器已上电",
                 L"连接失败", MB_OK | MB_ICONERROR);
             UdpManager_Unbind(g_cfgUdp);   /* 停 RX 线程 + 关 socket */
