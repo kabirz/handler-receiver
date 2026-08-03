@@ -479,7 +479,7 @@ static DWORD WINAPI fw_upgrade_thread(LPVOID param)
         /* UDP 升级: START(size) → DATA(256B/包, offset 校验) → END(crc+testmode) */
         HANDLE hFile = CreateFileA(p->path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
         if (hFile == INVALID_HANDLE_VALUE) {
-            MessageBoxW(NULL, L"打开固件文件失败", L"错误", MB_OK | MB_ICONERROR);
+            MessageBoxW(g_hMain, L"打开固件文件失败", L"错误", MB_OK | MB_ICONERROR);
         } else {
             DWORD fileSize = GetFileSize(hFile, NULL);
             uint8_t *fileData = (uint8_t *)malloc(fileSize);
@@ -502,7 +502,7 @@ static DWORD WINAPI fw_upgrade_thread(LPVOID param)
                         swprintf(wmsg, 128,
                             L"数据发送失败 offset=%d\n固件 offset=%lu",
                             offset, got);
-                        MessageBoxW(NULL, wmsg, L"升级失败", MB_OK | MB_ICONERROR);
+                        MessageBoxW(g_hMain, wmsg, L"升级失败", MB_OK | MB_ICONERROR);
                         result = false;
                         break;
                     }
@@ -516,13 +516,13 @@ static DWORD WINAPI fw_upgrade_thread(LPVOID param)
                     if (UdpManager_FirmwareEnd(g_cfgUdp, 0, crc)) {
                         /* 成功, 不弹窗 (FW_Done 会显示) */
                     } else {
-                        MessageBoxW(NULL, L"烧写失败 (CRC 不匹配或错误)", L"升级失败",
+                        MessageBoxW(g_hMain, L"烧写失败 (CRC 不匹配或错误)", L"升级失败",
                                     MB_OK | MB_ICONERROR);
                         result = false;
                     }
                 }
             } else {
-                MessageBoxW(NULL, L"开始烧写失败 (固件未响应 START)", L"升级失败",
+                MessageBoxW(g_hMain, L"开始烧写失败 (固件未响应 START)", L"升级失败",
                             MB_OK | MB_ICONERROR);
             }
             free(fileData);
@@ -887,10 +887,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     RECT rc = { 0, 0, 480, 380 };
     AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX, FALSE, 0);
 
+    int winW = rc.right - rc.left, winH = rc.bottom - rc.top;
+    /* 主窗口居中屏幕 (CW_USEDEFAULT 对 overlapped 窗口默认靠左上角) */
+    int sx = (GetSystemMetrics(SM_CXSCREEN) - winW) / 2;
+    int sy = (GetSystemMetrics(SM_CYSCREEN) - winH) / 2;
+    if (sx < 0) sx = 0;
+    if (sy < 0) sy = 0;
+
     HWND hWnd = CreateWindowExW(0, L"ZCodeHandlerReceiver", L"手柄-接收器工具",
             WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
-            CW_USEDEFAULT, CW_USEDEFAULT,
-            rc.right - rc.left, rc.bottom - rc.top,
+            sx, sy, winW, winH,
             NULL, NULL, hInstance, NULL);
     if (!hWnd) return 1;
 
