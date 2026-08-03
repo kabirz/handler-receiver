@@ -177,8 +177,8 @@ static void CreateBindTabControls(HWND hDlg)
     hLbl = CreateWindowExW(0, L"STATIC", L"目标IP:",
             WS_CHILD | WS_VISIBLE, 20, 108, 44, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* IP 输入框 (纯 EDIT, 用户手输). 默认 255.255.255.255 (广播) */
-    HWND hIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"255.255.255.255",
+    /* IP 输入框 (纯 EDIT, 用户手输). 留空 (无默认值) */
+    HWND hIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
             66, 106, 110, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
     SendMessageW(hIp, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -337,7 +337,7 @@ static void OnUdpConnect(HWND hChildDlg)
     char ip[64] = { 0 };
     WideCharToMultiByte(CP_ACP, 0, wip, -1, ip, sizeof(ip), NULL, NULL);
     if (!ip[0]) {
-        MessageBoxW(g_hMain, L"请填写目标 IP (或选 255.255.255.255 广播)", L"提示",
+        MessageBoxW(g_hMain, L"请填写目标 IP\n(如 255.255.255.255 表示广播)", L"提示",
                     MB_OK | MB_ICONWARNING);
         return;
     }
