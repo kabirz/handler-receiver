@@ -140,55 +140,106 @@ static void RefreshCanDevices(HWND hCombo)
     }
 }
 
+/* 创建手柄 CAN 连接 groupbox (设备下拉 + 刷新 + 连接, 固定 250K).
+ * yPos = groupbox 顶部 y 坐标. 控件 ID 三 tab 复用 (各 tab 是独立子对话框, ID 不冲突).
+ * 返回 groupbox 占用的总高度 (含间距). */
+static int CreateCanGroupBox(HWND hDlg, int yPos)
+{
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    CreateWindowExW(0, L"BUTTON", L"手柄 (CAN, 250K)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, yPos, 436, 70, hDlg, NULL, g_hInst, NULL);
+    HWND hLbl = CreateWindowExW(0, L"STATIC", L"设备:",
+            WS_CHILD | WS_VISIBLE, 20, yPos + 24, 36, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hDev = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
+            56, yPos + 22, 115, 100, hDlg, (HMENU)(INT_PTR)IDC_CAN_DEVICE, g_hInst, NULL);
+    SendMessageW(hDev, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hRefresh = CreateWindowExW(0, L"BUTTON", L"刷新",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            296, yPos + 22, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_REFRESH, g_hInst, NULL);
+    SendMessageW(hRefresh, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hCanConn = CreateWindowExW(0, L"BUTTON", L"连接",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_CONNECT, g_hInst, NULL);
+    SendMessageW(hCanConn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    RefreshCanDevices(hDev);
+    return 78;  /* groupbox 高 70 + 8 间距 */
+}
+
+/* 创建接收器 UDP 连接 groupbox (目标 IP + 连接, 配置端口固定 9200).
+ * 返回 groupbox 占用的总高度. */
+static int CreateUdpGroupBox(HWND hDlg, int yPos)
+{
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    CreateWindowExW(0, L"BUTTON", L"接收器 (UDP)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, yPos, 436, 70, hDlg, NULL, g_hInst, NULL);
+    HWND hLbl = CreateWindowExW(0, L"STATIC", L"目标IP:",
+            WS_CHILD | WS_VISIBLE, 20, yPos + 24, 44, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            66, yPos + 22, 110, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
+    SendMessageW(hIp, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hUdpConn = CreateWindowExW(0, L"BUTTON", L"连接",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_CONNECT, g_hInst, NULL);
+    SendMessageW(hUdpConn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    return 78;
+}
+
+/* 同步 CAN 连接状态到所有含 CAN groupbox 的 tab (Tab1/Tab2).
+ * 连接后按钮变"断开"+禁用设备下拉/刷新; 断开后反之. */
+static void SyncCanConnState(void)
+{
+    const wchar_t *text = g_canConnected ? L"断开" : L"连接";
+    BOOL enable = g_canConnected ? FALSE : TRUE;
+    /* Tab1 和 Tab2 都有 CAN groupbox */
+    for (int i = 0; i < 2; i++) {
+        HWND h = g_hTabDlg[i];
+        if (!h) continue;
+        SetWindowTextW(GetDlgItem(h, IDC_CAN_CONNECT), text);
+        EnableWindow(GetDlgItem(h, IDC_CAN_DEVICE), enable);
+        EnableWindow(GetDlgItem(h, IDC_CAN_REFRESH), enable);
+    }
+    /* Tab2 升级按钮启用条件: 已连接 + 固件路径已选 */
+    if (g_hTabDlg[1]) {
+        EnableWindow(GetDlgItem(g_hTabDlg[1], IDC_HFW_UPGRADE),
+                     g_canConnected && strlen(g_handlerFwPath) > 0 ? TRUE : FALSE);
+    }
+}
+
+/* 同步 UDP 连接状态到所有含 UDP groupbox 的 tab (Tab1/Tab3). */
+static void SyncUdpConnState(void)
+{
+    const wchar_t *text = g_udpConnected ? L"断开" : L"连接";
+    BOOL enable = g_udpConnected ? FALSE : TRUE;
+    /* Tab1 和 Tab3 都有 UDP groupbox */
+    HWND tabs[] = { g_hTabDlg[0], g_hTabDlg[2] };
+    for (int i = 0; i < 2; i++) {
+        HWND h = tabs[i];
+        if (!h) continue;
+        SetWindowTextW(GetDlgItem(h, IDC_UDP_CONNECT), text);
+        EnableWindow(GetDlgItem(h, IDC_UDP_IP), enable);
+    }
+    /* Tab3 升级按钮启用条件: 已连接 + 固件路径已选 */
+    if (g_hTabDlg[2]) {
+        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_UPGRADE),
+                     g_udpConnected && strlen(g_receiverFwPath) > 0 ? TRUE : FALSE);
+    }
+}
+
 /* 创建各 tab 子对话框控件 (在 CreateTabLayout 后调用) */
 static void CreateBindTabControls(HWND hDlg)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-
-    /* ===== 手柄区 groupbox (仿 gateway-tool 左侧 CAN): 设备下拉 + 刷新 + 连接, 无波特率 (固定 250K) ===== */
-    CreateWindowExW(0, L"BUTTON", L"手柄 (CAN, 250K)",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 6, 436, 70, hDlg, NULL, g_hInst, NULL);
-    /* "设备:" 标签 */
-    HWND hLbl = CreateWindowExW(0, L"STATIC", L"设备:",
-            WS_CHILD | WS_VISIBLE, 20, 30, 36, 14, hDlg, NULL, g_hInst, NULL);
-    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 设备下拉 (CBS_DROPDOWNLIST, 不可编辑). 高度=下拉展开后列表总高, 按实际设备数给小一些 */
-    HWND hDev = CreateWindowExW(0, L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
-            56, 28, 115, 100, hDlg, (HMENU)(INT_PTR)IDC_CAN_DEVICE, g_hInst, NULL);
-    SendMessageW(hDev, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 刷新 / 连接 按钮 */
-    HWND hRefresh = CreateWindowExW(0, L"BUTTON", L"刷新",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            296, 28, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_REFRESH, g_hInst, NULL);
-    SendMessageW(hRefresh, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hCanConn = CreateWindowExW(0, L"BUTTON", L"连接",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            366, 28, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_CONNECT, g_hInst, NULL);
-    SendMessageW(hCanConn, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 预填设备列表 */
-    RefreshCanDevices(hDev);
-
-    /* ===== 接收器区 groupbox (仿 gateway-tool 右侧通道配置, 只保留 IP): 目标IP + 连接 ===== */
-    CreateWindowExW(0, L"BUTTON", L"接收器 (UDP)",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 84, 436, 70, hDlg, NULL, g_hInst, NULL);
-    hLbl = CreateWindowExW(0, L"STATIC", L"目标IP:",
-            WS_CHILD | WS_VISIBLE, 20, 108, 44, 14, hDlg, NULL, g_hInst, NULL);
-    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* IP 输入框 (纯 EDIT, 用户手输). 留空 (无默认值) */
-    HWND hIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            66, 106, 110, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
-    SendMessageW(hIp, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hUdpConn = CreateWindowExW(0, L"BUTTON", L"连接",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            366, 106, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_CONNECT, g_hInst, NULL);
-    SendMessageW(hUdpConn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    int y = 6;
+    y += CreateCanGroupBox(hDlg, y);    /* 手柄 CAN 区 */
+    y += CreateUdpGroupBox(hDlg, y);    /* 接收器 UDP 区 */
 
     /* ===== 操作按钮: 检测绑定状态 / 绑定设备 ===== */
-    int y = 168;
     struct { const wchar_t *text; int id; } btns[] = {
         { L"检测绑定状态",  IDC_BTN_CHECK_BIND },
         { L"绑定设备",      IDC_BTN_BIND       },
@@ -202,22 +253,22 @@ static void CreateBindTabControls(HWND hDlg)
     }
 }
 
-/* 通用: 创建 升级 tab 的 [路径框 + 浏览 + 升级] 三件套 */
-static void CreateFwTabControls(HWND hDlg, int file_id, int browse_id, int upgrade_id)
+/* 通用: 创建 升级 tab 的 [路径框 + 浏览 + 升级] 三件套. yPos = 固件区顶部 y 坐标 */
+static void CreateFwTabControls(HWND hDlg, int file_id, int browse_id, int upgrade_id, int yPos)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     HWND hLabel = CreateWindowExW(0, L"STATIC", L"固件文件:",
-            WS_CHILD | WS_VISIBLE, 20, 20, 60, 16,
+            WS_CHILD | WS_VISIBLE, 20, yPos + 4, 60, 16,
             hDlg, NULL, g_hInst, NULL);
     HWND hFile = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-            80, 18, 260, 22, hDlg, (HMENU)(INT_PTR)file_id, g_hInst, NULL);
+            80, yPos + 2, 260, 22, hDlg, (HMENU)(INT_PTR)file_id, g_hInst, NULL);
     HWND hBrowse = CreateWindowExW(0, L"BUTTON", L"浏览...",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            350, 18, 60, 22, hDlg, (HMENU)(INT_PTR)browse_id, g_hInst, NULL);
+            350, yPos + 2, 60, 22, hDlg, (HMENU)(INT_PTR)browse_id, g_hInst, NULL);
     HWND hUpg = CreateWindowExW(0, L"BUTTON", L"升级",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-            180, 60, 80, 28, hDlg, (HMENU)(INT_PTR)upgrade_id, g_hInst, NULL);
+            180, yPos + 42, 80, 28, hDlg, (HMENU)(INT_PTR)upgrade_id, g_hInst, NULL);
     SendMessageW(hLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
     SendMessageW(hFile,  WM_SETFONT, (WPARAM)hFont, TRUE);
     SendMessageW(hBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -226,12 +277,18 @@ static void CreateFwTabControls(HWND hDlg, int file_id, int browse_id, int upgra
 
 static void CreateHandlerFwTabControls(HWND hDlg)
 {
-    CreateFwTabControls(hDlg, IDC_HFW_FILE, IDC_HFW_BROWSE, IDC_HFW_UPGRADE);
+    /* Tab2: 顶部 CAN 连接 groupbox + 下方固件升级区 */
+    int y = 6;
+    y += CreateCanGroupBox(hDlg, y);
+    CreateFwTabControls(hDlg, IDC_HFW_FILE, IDC_HFW_BROWSE, IDC_HFW_UPGRADE, y + 4);
 }
 
 static void CreateTransmitterFwTabControls(HWND hDlg)
 {
-    CreateFwTabControls(hDlg, IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE);
+    /* Tab3: 顶部 UDP 连接 groupbox + 下方固件升级区 */
+    int y = 6;
+    y += CreateUdpGroupBox(hDlg, y);
+    CreateFwTabControls(hDlg, IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE, y + 4);
 }
 
 /* CAN 帧回调: 收到 0x105 RF24 配置响应时填 g_handlerAddr 并置标志 */
@@ -284,9 +341,7 @@ static void OnCanConnect(HWND hChildDlg)
         /* 断开 */
         CanManager_Disconnect(g_can);
         g_canConnected = 0;
-        SetWindowTextW(GetDlgItem(hChildDlg, IDC_CAN_CONNECT), L"连接");
-        EnableWindow(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), TRUE);
-        EnableWindow(GetDlgItem(hChildDlg, IDC_CAN_REFRESH), TRUE);
+        SyncCanConnState();
         return;
     }
     /* 连接: 从下拉取选中设备名 */
@@ -311,13 +366,7 @@ static void OnCanConnect(HWND hChildDlg)
     }
     CanManager_StartRxThread(g_can);
     g_canConnected = 1;
-    SetWindowTextW(GetDlgItem(hChildDlg, IDC_CAN_CONNECT), L"断开");
-    EnableWindow(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), FALSE);
-    EnableWindow(GetDlgItem(hChildDlg, IDC_CAN_REFRESH), FALSE);
-    /* 若手柄固件路径已选, 启用 Tab2 升级按钮 */
-    if (strlen(g_handlerFwPath) > 0) {
-        EnableWindow(GetDlgItem(g_hTabDlg[1], IDC_HFW_UPGRADE), TRUE);
-    }
+    SyncCanConnState();
 }
 
 /* 接收器连接/断开 (从 IP 框取目标 IP, 配置端口固定 9200). 已连接则断开. */
@@ -327,8 +376,7 @@ static void OnUdpConnect(HWND hChildDlg)
         /* 断开 */
         UdpManager_Unbind(g_cfgUdp);
         g_udpConnected = 0;
-        SetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_CONNECT), L"连接");
-        EnableWindow(GetDlgItem(hChildDlg, IDC_UDP_IP), TRUE);
+        SyncUdpConnState();
         return;
     }
     /* 取 IP 框内容 (CBS_DROPDOWN 可编辑, 读编辑文本) */
@@ -353,12 +401,7 @@ static void OnUdpConnect(HWND hChildDlg)
     }
     UdpManager_StartRxThread(g_cfgUdp);
     g_udpConnected = 1;
-    SetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_CONNECT), L"断开");
-    EnableWindow(GetDlgItem(hChildDlg, IDC_UDP_IP), FALSE);
-    /* 若接收器固件路径已选, 启用 Tab3 升级按钮 */
-    if (strlen(g_receiverFwPath) > 0) {
-        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_UPGRADE), TRUE);
-    }
+    SyncUdpConnState();
 }
 
 /* 检测绑定状态: 读手柄 NRF + 接收器 NRF, 比对 */
@@ -540,12 +583,16 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
     int cmdId = LOWORD(wParam);
     int tabIdx = (int)GetWindowLongPtrW(hChildDlg, GWLP_USERDATA);
 
+    /* CAN/UDP 连接命令三 tab 共享 (Tab1/Tab2 有 CAN, Tab1/Tab3 有 UDP) */
+    switch (cmdId) {
+    case IDC_CAN_REFRESH:       RefreshCanDevices(GetDlgItem(hChildDlg, IDC_CAN_DEVICE)); return;
+    case IDC_CAN_CONNECT:       OnCanConnect(hChildDlg);   return;
+    case IDC_UDP_CONNECT:       OnUdpConnect(hChildDlg);   return;
+    }
+
     if (tabIdx == 0) {
-        /* 手柄绑定页 */
+        /* 手柄绑定页: 剩余专属按钮 */
         switch (cmdId) {
-        case IDC_CAN_REFRESH:       RefreshCanDevices(GetDlgItem(hChildDlg, IDC_CAN_DEVICE)); break;
-        case IDC_CAN_CONNECT:       OnCanConnect(hChildDlg);   break;
-        case IDC_UDP_CONNECT:       OnUdpConnect(hChildDlg);   break;
         case IDC_BTN_CHECK_BIND:    OnCheckBind(hChildDlg);    break;
         case IDC_BTN_BIND:          OnBind(hChildDlg);         break;
         }
