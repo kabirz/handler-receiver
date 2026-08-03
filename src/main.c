@@ -153,10 +153,10 @@ static void CreateBindTabControls(HWND hDlg)
     HWND hLbl = CreateWindowExW(0, L"STATIC", L"设备:",
             WS_CHILD | WS_VISIBLE, 20, 30, 36, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 设备下拉 (CBS_DROPDOWNLIST, 不可编辑) */
+    /* 设备下拉 (CBS_DROPDOWNLIST, 不可编辑). 高度=下拉展开后列表总高, 按实际设备数给小一些 */
     HWND hDev = CreateWindowExW(0, L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
-            56, 28, 115, 200, hDlg, (HMENU)(INT_PTR)IDC_CAN_DEVICE, g_hInst, NULL);
+            56, 28, 115, 100, hDlg, (HMENU)(INT_PTR)IDC_CAN_DEVICE, g_hInst, NULL);
     SendMessageW(hDev, WM_SETFONT, (WPARAM)hFont, TRUE);
     /* 刷新 / 连接 按钮 */
     HWND hRefresh = CreateWindowExW(0, L"BUTTON", L"刷新",
