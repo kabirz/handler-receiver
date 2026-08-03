@@ -27,6 +27,7 @@
 #define WM_FW_COMPLETE       (WM_APP + 6)
 #define WM_FW_SHOW_PROGRESS  (WM_APP + 7)
 #define WM_DISC_FOUND_IP     (WM_APP + 9)  /* Tab4: 发现新 IP, lParam=_strdup(ip) */
+#define WM_DISC_DONE         (WM_APP + 10) /* Tab4: 查找结束, 主线程恢复按钮文字 */
 
 /* CAN 帧 ID 与 RF24 命令 (与 can_manager.h 互补, main.c 局部用) */
 #define CAN_ID_RF24_CONFIG_CMD   0x104
@@ -588,12 +589,13 @@ static DWORD WINAPI discover_thread(LPVOID param)
         return 0;
     }
 
-    /* 收集本机各网卡广播地址, 逐个发 GET_NET (0x13, 无 data) */
+    /* 收集本机各网卡广播地址, 用于周期性发送广播 */
     char baddrs[8][16];
     int bn = UdpManager_GetBroadcastAddrs(baddrs, 8);
     if (bn == 0) { strcpy(baddrs[0], "255.255.255.255"); bn = 1; }
 
     uint8_t pkt = UDP_CMD_GET_NET;   /* 0x13 */
+    /* 发送一次广播到各网卡 */
     for (int i = 0; i < bn; i++) {
         struct sockaddr_in dst;
         memset(&dst, 0, sizeof(dst));
@@ -603,13 +605,28 @@ static DWORD WINAPI discover_thread(LPVOID param)
         sendto(s, (const char *)&pkt, 1, 0, (struct sockaddr *)&dst, sizeof(dst));
     }
 
-    /* 收集 2s 内的响应, 取源 IP 去重上报 */
-    time_t end = time(NULL) + 2;
+    /* 接收窗口 10s, 每轮 select 等 500ms; 每 2s 重发一次广播 (覆盖响应慢/丢包).
+     * 取响应源 IP 去重上报. 用户可随时点"停止查找"提前结束 (g_discRunning=FALSE). */
+    time_t end = time(NULL) + 10;
+    time_t nextSend = time(NULL) + 2;   /* 下次重发时刻 */
     while (g_discRunning && time(NULL) < end) {
+        /* 到重发时刻: 再发一轮广播 */
+        if (time(NULL) >= nextSend) {
+            for (int i = 0; i < bn; i++) {
+                struct sockaddr_in dst;
+                memset(&dst, 0, sizeof(dst));
+                dst.sin_family = AF_INET;
+                dst.sin_port = htons(9200);
+                dst.sin_addr.s_addr = inet_addr(baddrs[i]);
+                sendto(s, (const char *)&pkt, 1, 0, (struct sockaddr *)&dst, sizeof(dst));
+            }
+            nextSend = time(NULL) + 2;
+        }
+
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(s, &rfds);
-        struct timeval tv = { 0, 200000 };  /* 200ms 一次, 便于响应停止 */
+        struct timeval tv = { 0, 500000 };  /* 500ms 一次, 兼顾及时停止与重发 */
         int r = select(0, &rfds, NULL, NULL, &tv);
         if (r <= 0) continue;
 
@@ -626,6 +643,9 @@ static DWORD WINAPI discover_thread(LPVOID param)
     }
 
     closesocket(s);
+    /* 查找结束 (10s 到或用户停止), 通知主线程恢复按钮文字 */
+    g_discRunning = FALSE;
+    PostMessageW(g_hMain, WM_DISC_DONE, 0, 0);
     return 0;
 }
 
@@ -1262,6 +1282,13 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         }
         return 0;
     }
+
+    case WM_DISC_DONE:
+        /* 查找线程结束 (10s 到或用户点停止), 恢复 Tab4 按钮文字 */
+        if (g_hTabDlg[3]) {
+            SetWindowTextW(GetDlgItem(g_hTabDlg[3], IDC_DISC_START), L"开始查找");
+        }
+        return 0;
 
     case WM_FW_COMPLETE: {
         BOOL isCan = (wParam == 1);
