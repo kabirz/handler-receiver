@@ -22,6 +22,9 @@ struct CanManager {
 	HANDLE fw_event;
 	CanFrame fw_response;
 	volatile bool fw_got_response;
+
+	/* 最近一次 Connect 失败的 PCAN status (0=OK). 供上层友好提示占用/不存在 */
+	uint32_t last_error;
 };
 
 CanManager *CanManager_Create(void)
@@ -53,10 +56,12 @@ bool CanManager_Connect(CanManager *mgr, int channel, int baudrate)
 
 	TPCANStatus status = Pcan_Initialize((uint32_t)channel, (uint32_t)baudrate, 0, 0, 0);
 	if (status != PCAN_ERROR_OK) {
+		mgr->last_error = status;
 		LeaveCriticalSection(&mgr->cs);
 		if (mgr->msg_cb) mgr->msg_cb("CAN连接失败", mgr->msg_data);
 		return false;
 	}
+	mgr->last_error = PCAN_ERROR_OK;
 
 	mgr->channel = (TPCANHandle)channel;
 	mgr->connected = true;
@@ -91,6 +96,17 @@ void CanManager_Disconnect(CanManager *mgr)
 bool CanManager_IsConnected(CanManager *mgr)
 {
 	return mgr && mgr->connected;
+}
+
+int CanManager_GetChannel(CanManager *mgr)
+{
+	if (!mgr || !mgr->connected) return -1;
+	return (int)mgr->channel;
+}
+
+uint32_t CanManager_GetLastError(CanManager *mgr)
+{
+	return mgr ? mgr->last_error : 0;
 }
 
 int CanManager_DetectDevice(CanManager *mgr, char devices[][256], int max_devices)

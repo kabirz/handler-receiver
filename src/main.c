@@ -53,10 +53,17 @@ static HWND g_hMain;
 static HWND g_hTab;
 static HWND g_hTabDlg[3];
 
-static CanManager *g_can;
+/* CAN 各 tab 独立: g_canTab[0]=Tab1 绑定用 (带 frame_cb 处理 NRF), g_canTab[1]=Tab2 升级用.
+ * 每个 tab 持有独立 CanManager 实例 + 独立连接状态, 互不影响 (同一 PCAN 设备被一个 tab
+ * Initialize 后, 另一个 tab 再 Initialize 同设备会失败 → 弹窗友好提示占用) */
+#define CAN_TAB_BIND    0   /* Tab1: 手柄绑定 (NRF 读取) */
+#define CAN_TAB_UPGRADE 1   /* Tab2: 手柄固件升级 */
+#define CAN_TAB_COUNT   2
+static CanManager *g_canTab[CAN_TAB_COUNT];
+static int g_canTabChannel[CAN_TAB_COUNT];   /* 各 tab 已连接的 channel, -1=未连接 */
+
 static UdpManager *g_cfgUdp;
 
-static int g_canConnected;
 static int g_udpConnected;
 
 /* 手柄 NRF (CAN 0x105 响应填入) */
@@ -123,12 +130,13 @@ static void RegisterTabChildClass(void)
 /* 主窗口过程 */
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-/* 刷新手柄设备下拉框 (扫 PCAN_USB 通道, 仿 gateway-tool RefreshDevices) */
-static void RefreshCanDevices(HWND hCombo)
+/* 刷新手柄设备下拉框 (扫 PCAN_USB 通道, 仿 gateway-tool RefreshDevices).
+ * tabIdx 决定用哪个 CanManager 实例扫描 (各 tab 独立) */
+static void RefreshCanDevices(HWND hCombo, int tabIdx)
 {
     SendMessageW(hCombo, CB_RESETCONTENT, 0, 0);
     char devices[16][256];
-    int count = CanManager_DetectDevice(g_can, devices, 16);
+    int count = CanManager_DetectDevice(g_canTab[tabIdx], devices, 16);
     for (int i = 0; i < count; i++) {
         /* 设备名是 ASCII, 转 wchar_t 加入下拉 */
         wchar_t wname[256];
@@ -164,7 +172,9 @@ static int CreateCanGroupBox(HWND hDlg, int yPos)
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_CAN_CONNECT, g_hInst, NULL);
     SendMessageW(hCanConn, WM_SETFONT, (WPARAM)hFont, TRUE);
-    RefreshCanDevices(hDev);
+    /* 预填设备列表: tabIdx 来自子对话框 GWLP_USERDATA (Tab1=0, Tab2=1, 对应 CAN_TAB_*) */
+    int tabIdx = (int)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+    RefreshCanDevices(hDev, tabIdx);
     return 78;  /* groupbox 高 70 + 8 间距 */
 }
 
@@ -190,24 +200,21 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos)
     return 78;
 }
 
-/* 同步 CAN 连接状态到所有含 CAN groupbox 的 tab (Tab1/Tab2).
- * 连接后按钮变"断开"+禁用设备下拉/刷新; 断开后反之. */
-static void SyncCanConnState(void)
+/* 同步指定 CAN tab 的连接状态到 UI (按钮文字/控件禁用).
+ * canTabIdx: CAN_TAB_BIND(Tab1) 或 CAN_TAB_UPGRADE(Tab2), 各 tab 独立. */
+static void SyncCanConnState(int canTabIdx)
 {
-    const wchar_t *text = g_canConnected ? L"断开" : L"连接";
-    BOOL enable = g_canConnected ? FALSE : TRUE;
-    /* Tab1 和 Tab2 都有 CAN groupbox */
-    for (int i = 0; i < 2; i++) {
-        HWND h = g_hTabDlg[i];
-        if (!h) continue;
-        SetWindowTextW(GetDlgItem(h, IDC_CAN_CONNECT), text);
-        EnableWindow(GetDlgItem(h, IDC_CAN_DEVICE), enable);
-        EnableWindow(GetDlgItem(h, IDC_CAN_REFRESH), enable);
-    }
-    /* Tab2 升级按钮启用条件: 已连接 + 固件路径已选 */
-    if (g_hTabDlg[1]) {
-        EnableWindow(GetDlgItem(g_hTabDlg[1], IDC_HFW_UPGRADE),
-                     g_canConnected && strlen(g_handlerFwPath) > 0 ? TRUE : FALSE);
+    int connected = (g_canTabChannel[canTabIdx] >= 0);
+    /* CAN tab 索引 → 子对话框索引: BIND→Tab1(0), UPGRADE→Tab2(1) */
+    HWND h = g_hTabDlg[canTabIdx];
+    if (!h) return;
+    SetWindowTextW(GetDlgItem(h, IDC_CAN_CONNECT), connected ? L"断开" : L"连接");
+    EnableWindow(GetDlgItem(h, IDC_CAN_DEVICE),  connected ? FALSE : TRUE);
+    EnableWindow(GetDlgItem(h, IDC_CAN_REFRESH), connected ? FALSE : TRUE);
+    /* Tab2 升级按钮: 仅 UPGRADE tab, 条件=已连接+固件路径已选 */
+    if (canTabIdx == CAN_TAB_UPGRADE) {
+        EnableWindow(GetDlgItem(h, IDC_HFW_UPGRADE),
+                     connected && strlen(g_handlerFwPath) > 0 ? TRUE : FALSE);
     }
 }
 
@@ -323,7 +330,7 @@ static BOOL ReadHandlerNrf(void)
     g_handlerAddrGot = FALSE;
     uint8_t data[8] = { 0 };
     data[0] = RF24_CMD_GET_CONFIG;
-    if (!CanManager_Send(g_can, CAN_ID_RF24_CONFIG_CMD, data, 8)) {
+    if (!CanManager_Send(g_canTab[CAN_TAB_BIND], CAN_ID_RF24_CONFIG_CMD, data, 8)) {
         return FALSE;
     }
     /* 轮询等待 (frame_cb 在 RX 线程置标志) */
@@ -334,14 +341,19 @@ static BOOL ReadHandlerNrf(void)
     return FALSE;
 }
 
-/* 手柄连接/断开 (从下拉取选中设备, 固定 250K). 已连接则断开. */
+/* CAN 连接/断开 (各 tab 独立). hChildDlg 的 GWLP_USERDATA 给出 tab 索引.
+ * Tab1(0)→CAN_TAB_BIND, Tab2(1)→CAN_TAB_UPGRADE. 失败友好提示占用原因. */
 static void OnCanConnect(HWND hChildDlg)
 {
-    if (g_canConnected) {
+    int tabIdx = (int)GetWindowLongPtrW(hChildDlg, GWLP_USERDATA);
+    /* Tab1/Tab2 对应 CAN_TAB_BIND/CAN_TAB_UPGRADE (数值一致) */
+    int canTabIdx = (tabIdx == 0) ? CAN_TAB_BIND : CAN_TAB_UPGRADE;
+
+    if (g_canTabChannel[canTabIdx] >= 0) {
         /* 断开 */
-        CanManager_Disconnect(g_can);
-        g_canConnected = 0;
-        SyncCanConnState();
+        CanManager_Disconnect(g_canTab[canTabIdx]);
+        g_canTabChannel[canTabIdx] = -1;
+        SyncCanConnState(canTabIdx);
         return;
     }
     /* 连接: 从下拉取选中设备名 */
@@ -359,14 +371,40 @@ static void OnCanConnect(HWND hChildDlg)
     int channel = 0;
     sscanf(dev, "PCAN_USB_%d (0x%X)", &channel, &channel);
 
-    if (!CanManager_Connect(g_can, channel, PCAN_BAUD_250K)) {
-        MessageBoxW(g_hMain, L"设备被占用，请查看并释放", L"连接失败",
-                    MB_OK | MB_ICONERROR);
+    /* 先检查: 另一个 CAN tab 是否已占同一 channel → 友好提示 */
+    for (int other = 0; other < CAN_TAB_COUNT; other++) {
+        if (other != canTabIdx && g_canTabChannel[other] == channel) {
+            wchar_t wmsg[160];
+            const wchar_t *otherName = (other == CAN_TAB_BIND) ? L"手柄绑定页" : L"手柄升级页";
+            swprintf(wmsg, 160,
+                L"设备 %hs 已被本工具 %s 占用\n请先在该页断开, 或选择其他设备", dev, otherName);
+            MessageBoxW(g_hMain, wmsg, L"设备被占用", MB_OK | MB_ICONWARNING);
+            return;
+        }
+    }
+
+    if (!CanManager_Connect(g_canTab[canTabIdx], channel, PCAN_BAUD_250K)) {
+        /* 连接失败: 用 PCAN status 友好提示. status==0 但失败=异常; 否则按常见码归类 */
+        uint32_t st = CanManager_GetLastError(g_canTab[canTabIdx]);
+        wchar_t wmsg[200];
+        if (st == 0) {
+            swprintf(wmsg, 200, L"连接失败\n设备 %hs 可能未正确连接或驱动异常", dev);
+        } else {
+            /* 取 PCAN 错误文本 (英文, Pcan_GetErrorText 在 pcan_loader 已加载) */
+            char err[256] = "PCAN error";
+            if (Pcan_GetErrorText) {
+                Pcan_GetErrorText(st, 0x0409 /* English */, err);  /* 中文 0x0804 可能不支持, 用英文 */
+            }
+            swprintf(wmsg, 200,
+                L"连接失败 (0x%X)\n%hs\n\n设备可能被其他程序占用, 或设备未连接",
+                st, err);
+        }
+        MessageBoxW(g_hMain, wmsg, L"连接失败", MB_OK | MB_ICONERROR);
         return;
     }
-    CanManager_StartRxThread(g_can);
-    g_canConnected = 1;
-    SyncCanConnState();
+    CanManager_StartRxThread(g_canTab[canTabIdx]);
+    g_canTabChannel[canTabIdx] = channel;
+    SyncCanConnState(canTabIdx);
 }
 
 /* 接收器连接/断开 (从 IP 框取目标 IP, 配置端口固定 9200). 已连接则断开. */
@@ -407,7 +445,7 @@ static void OnUdpConnect(HWND hChildDlg)
 /* 检测绑定状态: 读手柄 NRF + 接收器 NRF, 比对 */
 static void OnCheckBind(HWND hChildDlg)
 {
-    if (!g_canConnected || !g_udpConnected) {
+    if (g_canTabChannel[CAN_TAB_BIND] < 0 || !g_udpConnected) {
         MessageBoxW(g_hMain, L"请先连接手柄和接收器", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -454,7 +492,7 @@ static void OnCheckBind(HWND hChildDlg)
 static void OnBind(HWND hChildDlg)
 {
     (void)hChildDlg;
-    if (!g_canConnected || !g_udpConnected) {
+    if (g_canTabChannel[CAN_TAB_BIND] < 0 || !g_udpConnected) {
         MessageBoxW(g_hMain, L"请先连接手柄和接收器", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
@@ -515,7 +553,7 @@ static DWORD WINAPI fw_upgrade_thread(LPVOID param)
     if (p->isCan) {
         /* CAN 升级: test_mode 固定 0 (永久). 传 NULL msg_cb 避免 gateway-tool 内部
          * 日志走我们的回调链 (进度走 progress_cb 即可) */
-        result = CanManager_FirmwareUpgrade(g_can, p->path, 0,
+        result = CanManager_FirmwareUpgrade(g_canTab[CAN_TAB_UPGRADE], p->path, 0,
                                             NULL, NULL,
                                             can_fw_progress_cb, (void *)hMain);
     } else {
@@ -585,7 +623,7 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
 
     /* CAN/UDP 连接命令三 tab 共享 (Tab1/Tab2 有 CAN, Tab1/Tab3 有 UDP) */
     switch (cmdId) {
-    case IDC_CAN_REFRESH:       RefreshCanDevices(GetDlgItem(hChildDlg, IDC_CAN_DEVICE)); return;
+    case IDC_CAN_REFRESH:       RefreshCanDevices(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), tabIdx); return;
     case IDC_CAN_CONNECT:       OnCanConnect(hChildDlg);   return;
     case IDC_UDP_CONNECT:       OnUdpConnect(hChildDlg);   return;
     }
@@ -612,12 +650,13 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
             if (GetOpenFileNameA(&ofn)) {
                 strcpy(g_handlerFwPath, file);
                 SetWindowTextA(GetDlgItem(hChildDlg, IDC_HFW_FILE), file);
-                EnableWindow(GetDlgItem(hChildDlg, IDC_HFW_UPGRADE), g_canConnected ? TRUE : FALSE);
+                EnableWindow(GetDlgItem(hChildDlg, IDC_HFW_UPGRADE),
+                             g_canTabChannel[CAN_TAB_UPGRADE] >= 0 ? TRUE : FALSE);
             }
             break;
         }
         case IDC_HFW_UPGRADE:
-            if (g_canConnected && strlen(g_handlerFwPath) > 0) {
+            if (g_canTabChannel[CAN_TAB_UPGRADE] >= 0 && strlen(g_handlerFwPath) > 0) {
                 EnableWindow(GetDlgItem(hChildDlg, IDC_HFW_UPGRADE), FALSE);
                 EnableWindow(GetDlgItem(hChildDlg, IDC_HFW_BROWSE), FALSE);
                 FwUpgradeParam *param = (FwUpgradeParam *)malloc(sizeof(FwUpgradeParam));
@@ -625,8 +664,8 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
                 strcpy(param->path, g_handlerFwPath);
                 param->isCan = 1;
                 CreateThread(NULL, 0, fw_upgrade_thread, param, 0, NULL);
-            } else if (!g_canConnected) {
-                MessageBoxW(g_hMain, L"请先连接手柄 (Tab1)", L"提示",
+            } else if (g_canTabChannel[CAN_TAB_UPGRADE] < 0) {
+                MessageBoxW(g_hMain, L"请先在本页连接手柄设备", L"提示",
                             MB_OK | MB_ICONWARNING);
             }
             break;
@@ -725,7 +764,7 @@ static LRESULT CALLBACK ProgressWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPAR
             if (g_progressDone) DestroyWindow(hDlg);
         } else if (LOWORD(wParam) == IDC_PROG_REBOOT) {
             if (g_progressIsCan) {
-                if (g_can) CanManager_Reboot(g_can);
+                if (g_canTab[CAN_TAB_UPGRADE]) CanManager_Reboot(g_canTab[CAN_TAB_UPGRADE]);
             } else {
                 if (g_cfgUdp) UdpManager_Reboot(g_cfgUdp);
             }
@@ -915,11 +954,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     g_hInst = hInstance;
 
-    /* 创建 CAN/UDP 管理器 */
-    g_can = CanManager_Create();
+    /* 创建 CAN/UDP 管理器: 各 CAN tab 独立 CanManager (Tab1 绑定 / Tab2 升级).
+     * 只有 BIND tab 挂 frame_cb (处理 0x105 NRF 响应); UPGRADE tab 只用于固件升级 */
+    for (int i = 0; i < CAN_TAB_COUNT; i++) {
+        g_canTab[i] = CanManager_Create();
+        g_canTabChannel[i] = -1;
+        CanManager_SetMsgCallback(g_canTab[i], can_msg_cb, NULL);
+        if (i == CAN_TAB_BIND) {
+            CanManager_SetFrameCallback(g_canTab[i], can_frame_cb, NULL);
+        }
+    }
     g_cfgUdp = UdpManager_Create();
-    CanManager_SetMsgCallback(g_can, can_msg_cb, NULL);
-    CanManager_SetFrameCallback(g_can, can_frame_cb, NULL);
     UdpManager_SetMsgCallback(g_cfgUdp, udp_msg_cb, NULL);
 
     WNDCLASSW wc = { 0 };
@@ -966,7 +1011,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
     /* 消息循环退出后销毁 */
-    CanManager_Destroy(g_can);
+    for (int i = 0; i < CAN_TAB_COUNT; i++) {
+        if (g_canTab[i]) CanManager_Destroy(g_canTab[i]);
+    }
     UdpManager_Destroy(g_cfgUdp);
     return (int)m.wParam;
 }

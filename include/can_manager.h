@@ -57,6 +57,13 @@ bool CanManager_Connect(CanManager *mgr, int channel, int baudrate);
 void CanManager_Disconnect(CanManager *mgr);
 bool CanManager_IsConnected(CanManager *mgr);
 
+/* 当前已连接的 PCAN channel (未连接返回 -1). 用于跨实例占用判断 */
+int CanManager_GetChannel(CanManager *mgr);
+
+/* 最近一次 Connect 失败时的 PCAN status (成功返回 PCAN_ERROR_OK=0).
+ * 用于友好提示失败原因 (设备不存在 / 被占用等) */
+uint32_t CanManager_GetLastError(CanManager *mgr);
+
 /* 设备枚举 (扫描 PCAN-USB 通道) */
 int CanManager_DetectDevice(CanManager *mgr, char devices[][256], int max_devices);
 
