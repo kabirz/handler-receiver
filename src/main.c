@@ -1,8 +1,9 @@
 /*
  * 手柄-接收器工具 - Win32 GUI 应用
- * Tab1: 手柄绑定 (手柄CAN扫描/连接 + 接收器UDP连接 + NRF读取比对 + 绑定)
+ * Tab1: 手柄绑定 (手柄CAN扫描/连接 + 接收器UDP单播连接 + NRF读取比对 + 绑定)
  * Tab2: 手柄升级 (CAN)
- * Tab3: 手柄接收端升级 (UDP)
+ * Tab3: 手柄接收端配置 (UDP, 含固件升级 + 网络参数设置)
+ * Tab4: 设备查找 (广播发现接收器真实 IP)
  */
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -25,6 +26,7 @@
 #define WM_UPDATE_PROGRESS   (WM_APP + 3)
 #define WM_FW_COMPLETE       (WM_APP + 6)
 #define WM_FW_SHOW_PROGRESS  (WM_APP + 7)
+#define WM_DISC_FOUND_IP     (WM_APP + 9)  /* Tab4: 发现新 IP, lParam=_strdup(ip) */
 
 /* CAN 帧 ID 与 RF24 命令 (与 can_manager.h 互补, main.c 局部用) */
 #define CAN_ID_RF24_CONFIG_CMD   0x104
@@ -46,12 +48,20 @@
 #define IDC_TFW_FILE             1201
 #define IDC_TFW_BROWSE           1202
 #define IDC_TFW_UPGRADE          1203
+/* Tab3 网络参数设置 (SET_NET 0x12) */
+#define IDC_NET_IP               1210   /* 设置用 IP 输入框 */
+#define IDC_NET_PORT             1211   /* 设置用 数据端口 输入框 */
+#define IDC_NET_APPLY            1212   /* 设置按钮 */
+/* Tab4 设备查找 */
+#define IDC_DISC_START           1301   /* 开始/停止查找 按钮 */
+#define IDC_DISC_LIST            1302   /* 发现的 IP 列表 (LISTBOX) */
+#define IDC_DISC_COPY            1303   /* 复制选中 IP 到剪贴板 按钮 */
 
 /* 全局状态 */
 static HINSTANCE g_hInst;
 static HWND g_hMain;
 static HWND g_hTab;
-static HWND g_hTabDlg[3];
+static HWND g_hTabDlg[4];
 
 /* CAN 各 tab 独立: g_canTab[0]=Tab1 绑定用 (带 frame_cb 处理 NRF), g_canTab[1]=Tab2 升级用.
  * 每个 tab 持有独立 CanManager 实例 + 独立连接状态, 互不影响 (同一 PCAN 设备被一个 tab
@@ -65,6 +75,10 @@ static int g_canTabChannel[CAN_TAB_COUNT];   /* 各 tab 已连接的 channel, -1
 static UdpManager *g_cfgUdp;
 
 static int g_udpConnected;
+
+/* Tab4 设备查找: 原生 winsock 广播 GET_NET (0x13), 收集 2s 内响应源 IP.
+ * 用独立 socket (本地端口 9202), 不走 UdpManager. g_discRunning=查找中. */
+static volatile BOOL g_discRunning;
 
 /* 手柄 NRF (CAN 0x105 响应填入) */
 static uint8_t g_handlerCh;
@@ -292,10 +306,62 @@ static void CreateHandlerFwTabControls(HWND hDlg)
 
 static void CreateTransmitterFwTabControls(HWND hDlg)
 {
-    /* Tab3: 顶部 UDP 连接 groupbox + 下方固件升级区 */
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    /* Tab3: UDP 连接 groupbox + 固件升级区 + 网络参数设置区 */
     int y = 6;
-    y += CreateUdpGroupBox(hDlg, y);
-    CreateFwTabControls(hDlg, IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE, y + 4);
+    y += CreateUdpGroupBox(hDlg, y);       /* UDP 连接 (y=6→84) */
+    CreateFwTabControls(hDlg, IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE, y + 4);  /* 固件区 (y≈88) */
+
+    /* 网络参数 groupbox: 设置接收器 IP + 数据端口 (SET_NET 0x12).
+     * 掩码固定 255.255.255.0, 网关=IP 末段改 1, 固件自算, 不传. */
+    int ny = 178;
+    CreateWindowExW(0, L"BUTTON", L"网络参数 (写入选器)",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, ny, 436, 70, hDlg, NULL, g_hInst, NULL);
+    HWND hLbl = CreateWindowExW(0, L"STATIC", L"IP:",
+            WS_CHILD | WS_VISIBLE, 20, ny + 26, 24, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hNetIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            46, ny + 24, 120, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_IP, g_hInst, NULL);
+    SendMessageW(hNetIp, WM_SETFONT, (WPARAM)hFont, TRUE);
+    hLbl = CreateWindowExW(0, L"STATIC", L"数据端口:",
+            WS_CHILD | WS_VISIBLE, 176, ny + 26, 52, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hNetPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            230, ny + 24, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_PORT, g_hInst, NULL);
+    SendMessageW(hNetPort, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hApply = CreateWindowExW(0, L"BUTTON", L"设置",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            366, ny + 24, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_APPLY, g_hInst, NULL);
+    SendMessageW(hApply, WM_SETFONT, (WPARAM)hFont, TRUE);
+}
+
+/* 创建 Tab4 设备查找控件: 开始/停止按钮 + IP 列表 + 复制按钮 */
+static void CreateDiscoverTabControls(HWND hDlg)
+{
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    /* 说明文字 */
+    HWND hLbl = CreateWindowExW(0, L"STATIC",
+            L"广播查找接收器真实 IP (向 255.255.255.255:9200 发 GET_NET, 收集响应源 IP)",
+            WS_CHILD | WS_VISIBLE, 20, 14, 410, 28, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 开始/停止查找 按钮 */
+    HWND hStart = CreateWindowExW(0, L"BUTTON", L"开始查找",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            20, 50, 120, 28, hDlg, (HMENU)(INT_PTR)IDC_DISC_START, g_hInst, NULL);
+    SendMessageW(hStart, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 复制选中 IP 按钮 */
+    HWND hCopy = CreateWindowExW(0, L"BUTTON", L"复制选中 IP",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            150, 50, 120, 28, hDlg, (HMENU)(INT_PTR)IDC_DISC_COPY, g_hInst, NULL);
+    SendMessageW(hCopy, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 发现的 IP 列表 (LISTBOX, 支持单选) */
+    HWND hList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP,
+            20, 90, 300, 180, hDlg, (HMENU)(INT_PTR)IDC_DISC_LIST, g_hInst, NULL);
+    SendMessageW(hList, WM_SETFONT, (WPARAM)hFont, TRUE);
 }
 
 /* CAN 帧回调: 收到 0x105 RF24 配置响应时填 g_handlerAddr 并置标志 */
@@ -417,17 +483,28 @@ static void OnUdpConnect(HWND hChildDlg)
         SyncUdpConnState();
         return;
     }
-    /* 取 IP 框内容 (CBS_DROPDOWN 可编辑, 读编辑文本) */
+    /* 取 IP 框内容 (纯单播: 必须是具体 IP, 拒绝空/广播地址) */
     wchar_t wip[64] = { 0 };
     GetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_IP), wip, 64);
     char ip[64] = { 0 };
     WideCharToMultiByte(CP_ACP, 0, wip, -1, ip, sizeof(ip), NULL, NULL);
     if (!ip[0]) {
-        MessageBoxW(g_hMain, L"请填写目标 IP\n(如 255.255.255.255 表示广播)", L"提示",
+        MessageBoxW(g_hMain, L"请填写接收器具体 IP 地址\n(本页只支持单播, 广播请用「设备查找」页)",
+                    L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    /* 校验: 拒绝有限广播 255.255.255.255 和子网定向广播 (x.x.x.255) */
+    unsigned long nip = inet_addr(ip);
+    if (nip == INADDR_NONE || nip == INADDR_ANY) {
+        MessageBoxW(g_hMain, L"IP 地址格式不正确", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (strcmp(ip, "255.255.255.255") == 0 || (nip & 0xFF) == 0xFF) {
+        MessageBoxW(g_hMain, L"本页只支持单播 IP\n广播发现请用「设备查找」页", L"提示",
                     MB_OK | MB_ICONWARNING);
         return;
     }
-    /* 本地 9201, 远程 9200. IP 空/0 → 广播自动发现; 255.255.255.255 → 有限广播 */
+    /* 本地 9201, 远程 9200, 单播到指定 IP */
     if (!UdpManager_Bind(g_cfgUdp, UDP_CHAN_CONFIG, 9201, ip, 9200)) {
         int err = WSAGetLastError();
         wchar_t wmsg[160];
@@ -440,6 +517,150 @@ static void OnUdpConnect(HWND hChildDlg)
     UdpManager_StartRxThread(g_cfgUdp);
     g_udpConnected = 1;
     SyncUdpConnState();
+}
+
+/* ===== Tab4 设备查找: 原生 winsock 广播 GET_NET 收集响应源 IP =====
+ * 不走 UdpManager (其 data_cb 不带源 IP); 直接 socket 收发, 拿 recvfrom 的源地址 */
+
+/* 设备查找线程: 广播 GET_NET, 收集 2s 内所有响应的源 IP, 去重后 PostMessage 到主线程 */
+static DWORD WINAPI discover_thread(LPVOID param)
+{
+    (void)param;
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return 0;
+
+    BOOL bc = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char *)&bc, sizeof(bc));
+    BOOL reuse = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
+
+    struct sockaddr_in local;
+    memset(&local, 0, sizeof(local));
+    local.sin_family = AF_INET;
+    local.sin_port = htons(9202);   /* 本地端口 9202, 避免和 Tab1/3 的 9201 冲突 */
+    local.sin_addr.s_addr = INADDR_ANY;
+    if (bind(s, (struct sockaddr *)&local, sizeof(local)) < 0) {
+        closesocket(s);
+        return 0;
+    }
+
+    /* 收集本机各网卡广播地址, 逐个发 GET_NET (0x13, 无 data) */
+    char baddrs[8][16];
+    int bn = UdpManager_GetBroadcastAddrs(baddrs, 8);
+    if (bn == 0) { strcpy(baddrs[0], "255.255.255.255"); bn = 1; }
+
+    uint8_t pkt = UDP_CMD_GET_NET;   /* 0x13 */
+    for (int i = 0; i < bn; i++) {
+        struct sockaddr_in dst;
+        memset(&dst, 0, sizeof(dst));
+        dst.sin_family = AF_INET;
+        dst.sin_port = htons(9200);
+        dst.sin_addr.s_addr = inet_addr(baddrs[i]);
+        sendto(s, (const char *)&pkt, 1, 0, (struct sockaddr *)&dst, sizeof(dst));
+    }
+
+    /* 收集 2s 内的响应, 取源 IP 去重上报 */
+    time_t end = time(NULL) + 2;
+    while (g_discRunning && time(NULL) < end) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(s, &rfds);
+        struct timeval tv = { 0, 200000 };  /* 200ms 一次, 便于响应停止 */
+        int r = select(0, &rfds, NULL, NULL, &tv);
+        if (r <= 0) continue;
+
+        struct sockaddr_in src;
+        int alen = sizeof(src);
+        uint8_t buf[64];
+        int n = recvfrom(s, (char *)buf, sizeof(buf), 0, (struct sockaddr *)&src, &alen);
+        if (n <= 0) continue;
+        /* 响应首字节应是 GET_NET (0x13); 宽松校验, 主要取源 IP */
+        char *ipstr = inet_ntoa(src.sin_addr);
+        if (ipstr) {
+            PostMessageA(g_hMain, WM_DISC_FOUND_IP, 0, (LPARAM)_strdup(ipstr));
+        }
+    }
+
+    closesocket(s);
+    return 0;
+}
+
+/* 开始/停止设备查找 */
+static void OnDiscoverStart(HWND hChildDlg)
+{
+    if (g_discRunning) {
+        /* 停止 */
+        g_discRunning = FALSE;
+        SetWindowTextW(GetDlgItem(hChildDlg, IDC_DISC_START), L"开始查找");
+        return;
+    }
+    /* 开始: 清空列表, 启动发现线程 */
+    SendMessageW(GetDlgItem(hChildDlg, IDC_DISC_LIST), LB_RESETCONTENT, 0, 0);
+    g_discRunning = TRUE;
+    SetWindowTextW(GetDlgItem(hChildDlg, IDC_DISC_START), L"停止查找");
+    CreateThread(NULL, 0, discover_thread, NULL, 0, NULL);
+}
+
+/* 复制选中 IP 到剪贴板 */
+static void OnDiscoverCopy(HWND hChildDlg)
+{
+    HWND hList = GetDlgItem(hChildDlg, IDC_DISC_LIST);
+    int sel = (int)SendMessageW(hList, LB_GETCURSEL, 0, 0);
+    if (sel < 0) {
+        MessageBoxW(g_hMain, L"请先在列表中选择一个 IP", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    wchar_t wip[64] = { 0 };
+    SendMessageW(hList, LB_GETTEXT, sel, (LPARAM)wip);
+    if (!OpenClipboard(g_hMain)) return;
+    EmptyClipboard();
+    size_t len = wcslen(wip) + 1;
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, len * sizeof(wchar_t));
+    if (hg) {
+        memcpy(GlobalLock(hg), wip, len * sizeof(wchar_t));
+        GlobalUnlock(hg);
+        SetClipboardData(CF_UNICODETEXT, hg);
+    }
+    CloseClipboard();
+    wchar_t wmsg[128];
+    swprintf(wmsg, 128, L"已复制到剪贴板:\n%s\n(可粘贴到「手柄绑定」页的 IP 框)", wip);
+    MessageBoxW(g_hMain, wmsg, L"已复制", MB_OK | MB_ICONINFORMATION);
+}
+
+/* 设置接收器网络参数 (SET_NET 0x12): IP + 数据端口. 掩码固定, 网关固件自算 */
+static void OnNetApply(HWND hChildDlg)
+{
+    if (!g_udpConnected) {
+        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    wchar_t wip[64] = { 0 }, wport[16] = { 0 };
+    GetWindowTextW(GetDlgItem(hChildDlg, IDC_NET_IP), wip, 64);
+    GetWindowTextW(GetDlgItem(hChildDlg, IDC_NET_PORT), wport, 16);
+    char ip[64] = { 0 };
+    WideCharToMultiByte(CP_ACP, 0, wip, -1, ip, sizeof(ip), NULL, NULL);
+    if (!ip[0]) {
+        MessageBoxW(g_hMain, L"请填写 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    /* IP 格式校验 */
+    unsigned long nip = inet_addr(ip);
+    if (nip == INADDR_NONE) {
+        MessageBoxW(g_hMain, L"IP 地址格式不正确", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    int port = _wtoi(wport);
+    if (port <= 0 || port > 65535) {
+        MessageBoxW(g_hMain, L"数据端口必须在 1-65535 范围内", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    /* SET_NET: [ip 4B][port 2B BE], 掩码固定 255.255.255.0 网关自动派生 */
+    if (UdpManager_SetNet(g_cfgUdp, ip, (uint16_t)port)) {
+        MessageBoxW(g_hMain, L"网络参数已发送\n重启接收器后生效", L"成功",
+                    MB_OK | MB_ICONINFORMATION);
+    } else {
+        MessageBoxW(g_hMain, L"设置失败 (发送命令失败)", L"错误", MB_OK | MB_ICONERROR);
+    }
 }
 
 /* 检测绑定状态: 读手柄 NRF + 接收器 NRF, 比对 */
@@ -704,6 +925,13 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
                             MB_OK | MB_ICONWARNING);
             }
             break;
+        case IDC_NET_APPLY:          OnNetApply(hChildDlg); break;
+        }
+    } else if (tabIdx == 3) {
+        /* 设备查找页 (Tab4) */
+        switch (cmdId) {
+        case IDC_DISC_START:         OnDiscoverStart(hChildDlg); break;
+        case IDC_DISC_COPY:          OnDiscoverCopy(hChildDlg);  break;
         }
     }
 }
@@ -722,8 +950,10 @@ static void CreateTabLayout(HWND hWnd)
     SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&ti);
     ti.pszText = (LPWSTR)L"手柄升级";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&ti);
-    ti.pszText = (LPWSTR)L"手柄接收端升级";
+    ti.pszText = (LPWSTR)L"手柄接收端配置";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 2, (LPARAM)&ti);
+    ti.pszText = (LPWSTR)L"设备查找";
+    SendMessageW(g_hTab, TCM_INSERTITEMW, 3, (LPARAM)&ti);
 
     /* Tab 标题字体: 系统默认是粗体 (菜单字体), 改为 Segoe UI 9pt 常规, 更清爽 */
     HFONT hTabFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -738,7 +968,7 @@ static void CreateTabLayout(HWND hWnd)
 
     RegisterTabChildClass();
     DWORD childStyle = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         g_hTabDlg[i] = CreateWindowExW(0, TABCHILD_CLASS, L"",
                 childStyle,
                 rcTab.left, rcTab.top,
@@ -752,6 +982,7 @@ static void CreateTabLayout(HWND hWnd)
     CreateBindTabControls(g_hTabDlg[0]);
     CreateHandlerFwTabControls(g_hTabDlg[1]);
     CreateTransmitterFwTabControls(g_hTabDlg[2]);
+    CreateDiscoverTabControls(g_hTabDlg[3]);
 }
 
 /* ===== 固件升级进度弹窗 (移植自 gateway-tool) ===== */
@@ -891,7 +1122,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         LPNMHDR nmh = (LPNMHDR)lParam;
         if (nmh->hwndFrom == g_hTab && nmh->code == TCN_SELCHANGE) {
             int sel = (int)SendMessageW(g_hTab, TCM_GETCURSEL, 0, 0);
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 4; i++) {
                 ShowWindow(g_hTabDlg[i], i == sel ? SW_SHOW : SW_HIDE);
             }
         }
@@ -913,6 +1144,31 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         wchar_t *text = (wchar_t *)lParam;
         FW_UpdateProgress(pct, text);
         if (text) free(text);
+        return 0;
+    }
+
+    case WM_DISC_FOUND_IP: {
+        /* 发现新 IP, 去重后加入 Tab4 列表. lParam=_strdup(ip ASCII) */
+        char *ip = (char *)lParam;
+        if (ip) {
+            HWND hList = GetDlgItem(g_hTabDlg[3], IDC_DISC_LIST);
+            if (hList) {
+                /* 去重: 遍历已有项比对 */
+                int cnt = (int)SendMessageW(hList, LB_GETCOUNT, 0, 0);
+                BOOL dup = FALSE;
+                wchar_t wip[64];
+                MultiByteToWideChar(CP_ACP, 0, ip, -1, wip, 64);
+                for (int i = 0; i < cnt; i++) {
+                    wchar_t tmp[64];
+                    SendMessageW(hList, LB_GETTEXT, i, (LPARAM)tmp);
+                    if (wcscmp(tmp, wip) == 0) { dup = TRUE; break; }
+                }
+                if (!dup) {
+                    SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)wip);
+                }
+            }
+            free(ip);
+        }
         return 0;
     }
 
