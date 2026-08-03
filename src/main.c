@@ -516,22 +516,23 @@ static void OnCanConnect(HWND hChildDlg)
         return;
     }
     CanManager_StartRxThread(g_canTab[canTabIdx]);
+    /* Tab1 (BIND) 先验证设备响应 (0x104 GET_CONFIG), 失败则断开且不标记已连接 */
+    if (canTabIdx == CAN_TAB_BIND) {
+        if (!ReadHandlerNrf()) {
+            MessageBoxW(g_hMain,
+                L"连接失败: 读取手柄 NRF 超时\n"
+                L"请确认设备已上电且为手柄设备",
+                L"连接失败", MB_OK | MB_ICONERROR);
+            CanManager_Disconnect(g_canTab[CAN_TAB_BIND]);
+            return;
+        }
+    }
+    /* 验证通过 (Tab1) 或非 Tab1 (Tab2): 正式标记已连接 */
     g_canTabChannel[canTabIdx] = channel;
     SyncCanConnState(canTabIdx);
     if (canTabIdx == CAN_TAB_UPGRADE) {
         /* 升级 tab 连接成功后自动读版本 */
         OnGetVersionCan(hChildDlg);
-    } else if (canTabIdx == CAN_TAB_BIND) {
-        /* 绑定 tab 连接后验证设备响应: 读 NRF (0x104 GET_CONFIG). 无响应=连接无效, 自动断开 */
-        if (!ReadHandlerNrf()) {
-            MessageBoxW(g_hMain,
-                L"手柄连接成功但无响应 (读取 NRF 超时)\n"
-                L"请确认设备已上电且为手柄设备",
-                L"连接失败", MB_OK | MB_ICONERROR);
-            CanManager_Disconnect(g_canTab[CAN_TAB_BIND]);
-            g_canTabChannel[CAN_TAB_BIND] = -1;
-            SyncCanConnState(CAN_TAB_BIND);
-        }
     }
 }
 
@@ -582,21 +583,22 @@ static void OnUdpConnect(HWND hChildDlg)
         return;
     }
     UdpManager_StartRxThread(g_cfgUdp);
-    g_udpConnected = 1;
-    SyncUdpConnState();
+    /* Tab1 先验证设备响应 (GET_RF24), 失败则断开且不标记已连接 (不显示"已连接") */
     if (tabIdx == 0) {
-        /* 绑定 tab (Tab1) 连接后验证设备响应: 读 NRF (GET_RF24). 无响应=连接无效, 自动断开 */
         uint8_t ch, addr[5];
         if (!UdpManager_GetRF24(g_cfgUdp, &ch, addr)) {
             MessageBoxW(g_hMain,
-                L"接收器连接成功但无响应 (读取 NRF 超时)\n"
+                L"连接失败: 读取接收器 NRF 超时\n"
                 L"请确认 IP 正确且接收器已上电",
                 L"连接失败", MB_OK | MB_ICONERROR);
-            UdpManager_Unbind(g_cfgUdp);
-            g_udpConnected = 0;
-            SyncUdpConnState();
+            UdpManager_Unbind(g_cfgUdp);   /* 停 RX 线程 + 关 socket */
+            return;
         }
-    } else if (GetDlgItem(hChildDlg, IDC_TFW_VERSION)) {
+    }
+    /* 验证通过 (Tab1) 或非 Tab1 (Tab3): 正式标记已连接 */
+    g_udpConnected = 1;
+    SyncUdpConnState();
+    if (tabIdx != 0 && GetDlgItem(hChildDlg, IDC_TFW_VERSION)) {
         /* Tab3 连接成功后自动读版本 */
         OnGetVersionUdp(hChildDlg);
     }
