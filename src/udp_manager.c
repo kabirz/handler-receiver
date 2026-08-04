@@ -588,19 +588,30 @@ uint16_t UdpManager_CRC16_CCITT(const uint8_t *data, size_t len)
 	return seed;
 }
 
-bool UdpManager_FirmwareStart(UdpManager *mgr, uint32_t size)
+bool UdpManager_FirmwareStart(UdpManager *mgr, uint32_t size, const uint8_t *keyhash,
+			      uint8_t *out_resp)
 {
-	uint8_t data[4];
+	uint8_t data[36];
+	unsigned dlen = 4;
 
 	data[0] = size & 0xFF;
 	data[1] = (size >> 8) & 0xFF;
 	data[2] = (size >> 16) & 0xFF;
 	data[3] = (size >> 24) & 0xFF;
 
-	uint8_t resp;
-	/* FW_START 擦除整个 slot1 分区, 耗时较长, 给 5s 超时 */
-	int n = fw_exchange(mgr, UDP_CMD_FW_START, data, 4, &resp, 1, 5000);
+	/* 携带 32B keyhash (从签名镜像提取) 供 FW 端校验, 不一致回状态 2 拒绝.
+	 * keyhash 为 NULL 则退回旧 4B 帧 (无校验, 兼容). */
+	if (keyhash) {
+		memcpy(data + 4, keyhash, 32);
+		dlen = 36;
+	}
 
+	uint8_t resp = 0;
+	/* FW_START 擦除整个 slot1 分区, 耗时较长, 给 5s 超时 */
+	int n = fw_exchange(mgr, UDP_CMD_FW_START, data, dlen, &resp, 1, 5000);
+
+	if (out_resp) *out_resp = resp;
+	/* resp: 0=失败, 1=成功, 2=keyhash 不一致被拒绝 */
 	return (n == 1 && resp == 1);
 }
 

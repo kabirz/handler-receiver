@@ -1,5 +1,6 @@
 #include "can_manager.h"
 #include "pcan_loader.h"
+#include "fw_image.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -285,6 +286,7 @@ bool CanManager_Reboot(CanManager *mgr)
  * 固件升级
  * ================================================================ */
 static bool doFirmwareUpgrade(CanManager *mgr, const char *firmware_path, int test_mode,
+			      const uint8_t *keyhash,
 			      can_msg_callback msg_cb, void *msg_data,
 			      can_msg_callback progress_cb, void *progress_data)
 {
@@ -307,6 +309,38 @@ static bool doFirmwareUpgrade(CanManager *mgr, const char *firmware_path, int te
 	}
 	CloseHandle(hFile);
 
+	/* 校验 MCUboot 镜像头: 非 MCUboot 镜像 (任意文件) 直接拒绝, 不进入升级流程. */
+	if (!fw_image_validate_header(fileData, fileSize)) {
+		free(fileData);
+		if (msg_cb) msg_cb("固件文件格式非法 (非 MCUboot 镜像), 已拒绝", msg_data);
+		return false;
+	}
+
+	/* 发送升级 keyhash (0x104): 从签名镜像提取 32B, 分 5 帧 (1B seq + 7B chunk).
+	 * FW 端在 START 前据此校验, 不一致返回 KEYHASH_ERROR 拒绝.
+	 * keyhash 参数为 NULL 时回退到内部从镜像提取; 提取失败则跳过 (兼容旧 FW). */
+	uint8_t kh_buf[IMG_KEYHASH_LEN];
+
+	if (!keyhash) {
+		if (fw_image_extract_keyhash(fileData, fileSize, kh_buf)) {
+			keyhash = kh_buf;
+		}
+	}
+	if (keyhash) {
+		for (int i = 0; i < 5; i++) {
+			uint8_t kh[8] = {0};
+			kh[0] = (uint8_t)i;
+			int rem = (int)IMG_KEYHASH_LEN - i * 7;
+			int chunk = (rem > 7) ? 7 : rem;
+			memcpy(kh + 1, keyhash + i * 7, chunk);
+			if (!CanManager_Send(mgr, CAN_ID_KEYHASH_RX, kh, 8)) {
+				free(fileData);
+				if (msg_cb) msg_cb("发送 keyhash 帧失败", msg_data);
+				return false;
+			}
+		}
+	}
+
 	/* 发送升级开始命令: cmd=data[0], size=data[4..7] (小端) */
 	uint8_t cmd[8] = {0};
 	uint32_t size_le = fileSize;
@@ -319,11 +353,22 @@ static bool doFirmwareUpgrade(CanManager *mgr, const char *firmware_path, int te
 		return false;
 	}
 
-	/* 等待 Flash 擦除完成 (返回 FW_CODE_OFFSET) */
+	/* 等待 Flash 擦除完成 (返回 FW_CODE_OFFSET);
+	 * keyhash 不一致时 FW 回 FW_CODE_KEYHASH_ERROR 拒绝. */
 	uint32_t code = 0, val = 0;
-	if (!wait_fw_response(mgr, 15000, &code, &val) || code != FW_CODE_OFFSET) {
+	if (!wait_fw_response(mgr, 15000, &code, &val)) {
 		free(fileData);
 		if (msg_cb) msg_cb("等待Flash擦除超时", msg_data);
+		return false;
+	}
+	if (code == FW_CODE_KEYHASH_ERROR) {
+		free(fileData);
+		if (msg_cb) msg_cb("FW: 固件 keyhash 校验失败, 已拒绝升级", msg_data);
+		return false;
+	}
+	if (code != FW_CODE_OFFSET) {
+		free(fileData);
+		if (msg_cb) msg_cb("启动固件升级被拒绝", msg_data);
 		return false;
 	}
 
@@ -337,6 +382,7 @@ static bool doFirmwareUpgrade(CanManager *mgr, const char *firmware_path, int te
 	int offset = 0;
 	int total = fileSize;
 	int ack_count = 0;
+	int last_pct = -1;
 
 	while (offset < total) {
 		int chunk = (total - offset > 8) ? 8 : (total - offset);
@@ -357,12 +403,16 @@ static bool doFirmwareUpgrade(CanManager *mgr, const char *firmware_path, int te
 			}
 		}
 
-		/* 进度回调 */
+		/* 进度回调: 仅当整数百分比变化时才回调, 否则每 8 字节一帧都会触发
+		 * UI 重绘 (SetWindowTextW) -> "升级中 NN%" 文字持续闪烁. */
 		if (progress_cb) {
-			char buf[32];
 			int pct = (int)((long long)offset * 100 / total);
-			sprintf(buf, "%d%%", pct);
-			progress_cb(buf, progress_data);
+			if (pct != last_pct) {
+				char buf[32];
+				sprintf(buf, "%d%%", pct);
+				progress_cb(buf, progress_data);
+				last_pct = pct;
+			}
 		}
 	}
 
@@ -392,15 +442,16 @@ static bool doFirmwareUpgrade(CanManager *mgr, const char *firmware_path, int te
 }
 
 bool CanManager_FirmwareUpgrade(CanManager *mgr, const char *firmware_path, int test_mode,
+				const uint8_t *keyhash,
 				can_msg_callback msg_cb, void *msg_data,
 				can_msg_callback progress_cb, void *progress_data)
 {
 	if (!mgr || !mgr->connected) return false;
-	EnterCriticalSection(&mgr->cs);
-	bool result = doFirmwareUpgrade(mgr, firmware_path, test_mode, msg_cb, msg_data,
-					progress_cb, progress_data);
-	LeaveCriticalSection(&mgr->cs);
-	return result;
+	/* 注意: 不可在此持锁包裹 doFirmwareUpgrade. wait_fw_response 会阻塞在 fw_event 上,
+	 * 而唤醒该事件的 RX 线程需获取同一 cs 才能存响应帧 -> 会死锁导致 "等待Flash擦除超时".
+	 * 发送路径由 CanManager_Send 内部的 cs 自保护, 这里无需再加锁. */
+	return doFirmwareUpgrade(mgr, firmware_path, test_mode, keyhash, msg_cb, msg_data,
+				 progress_cb, progress_data);
 }
 
 void CanManager_SetMsgCallback(CanManager *mgr, can_msg_callback cb, void *data)

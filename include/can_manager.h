@@ -9,7 +9,9 @@
 #define CAN_ID_PLATFORM_RX  0x101
 #define CAN_ID_PLATFORM_TX  0x102
 #define CAN_ID_FW_DATA_RX   0x103
-#define CAN_ID_RF24_CONFIG_RESP 0x105
+#define CAN_ID_KEYHASH_RX   0x104
+#define CAN_ID_RF24_CONFIG_CMD  0x110
+#define CAN_ID_RF24_CONFIG_RESP 0x111
 #define CAN_ID_HANDLER_STATE 0x1E3
 #define CAN_ID_HEARTBEAT    0x763
 #define CAN_ID_OVERBREAK_LASER 0x263
@@ -32,6 +34,7 @@ enum fw_code {
 	FW_CODE_CONFIRM,
 	FW_CODE_FLASH_ERROR,
 	FW_CODE_TRANFER_ERROR,
+	FW_CODE_KEYHASH_ERROR,
 };
 
 /* CAN 帧结构 (应用层) */
@@ -76,8 +79,11 @@ bool CanManager_GetVersion(CanManager *mgr, uint32_t *version);
 bool CanManager_Reboot(CanManager *mgr);
 
 /* 固件升级 (阻塞, 内部按 8 字节分帧并同步等待 ACK).
- * test_mode: 0=永久升级, 1=临时升级 (重启后恢复原固件). */
+ * test_mode: 0=永久升级, 1=临时升级 (重启后恢复原固件).
+ * keyhash: 从签名镜像提取的 32B keyhash (0x104 前置发送, 供 FW 端校验);
+ *          可为 NULL (跳过, 兼容旧 FW). */
 bool CanManager_FirmwareUpgrade(CanManager *mgr, const char *firmware_path, int test_mode,
+				const uint8_t *keyhash,
 				can_msg_callback msg_cb, void *msg_data,
 				can_msg_callback progress_cb, void *progress_data);
 

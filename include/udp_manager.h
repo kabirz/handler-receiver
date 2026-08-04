@@ -12,9 +12,9 @@
 /* UDP 配置命令格式: [cmd 1B][data...] (无魔数头, 走配置端口)
  * 与旧版不同: 不再有 0xAA 0x55 魔数头, 通道已分离 */
 #define GATEWAY_DATA_PORT_DEFAULT   9090  /* 数据端口默认 (可配, 固件持久化) */
-#define GATEWAY_CONFIG_PORT         9200  /* 配置端口 (固件固定, 不可改) */
+#define GATEWAY_CONFIG_PORT         8601  /* 配置端口 (固件固定, 不可改) */
 
-/* UDP 命令码 (命令帧首字节, 走配置端口 9200).
+/* UDP 命令码 (命令帧首字节, 走配置端口 8601).
  * 0x01-0x05: udp_fw_upgrade 库内命令 (FW_START/DATA/END/GET_VERSION/REBOOT)
  * 0x12+:     应用业务命令 (分网络/RF24 两组, 各含 set/get).
  *            掩码固定 255.255.255.0, 网关 = IP 末段改 1, 均不在帧中传输. */
@@ -44,7 +44,7 @@ typedef enum {
  *   GET_NET  (0x13): [ip 4B][port 2B BE] = 6B → ip/data_port
  *   GET_RF24 (0x15): [ch 1B][addr 5B] = 6B → rf24_channel/rf24_addr
  * 掩码固定 255.255.255.0; 网关 = IP 末段改 1 (上位机不传, 固件自算).
- * remote_data_port = data_port + 1 (上位机计算); config_port 恒为 9200 (硬编码). */
+ * remote_data_port = data_port + 1 (上位机计算); config_port 恒为 8601 (硬编码). */
 typedef struct {
 	uint8_t rf24_channel;
 	uint8_t rf24_addr[5];
@@ -101,12 +101,15 @@ bool UdpManager_Reboot(UdpManager *mgr);
 /* CRC16-CCITT (poly 0x1021, init 0x0000), 与固件 crc16_ccitt 对齐 */
 uint16_t UdpManager_CRC16_CCITT(const uint8_t *data, size_t len);
 
-/* 固件升级 (配置端口 9200, 0x01-0x03 由 udp_fw_upgrade 库处理):
- *   Start: 发 [0x01][size 4B LE], 固件回 [0x01][1/0], 成功返回 true
+/* 固件升级 (配置端口 8601, 0x01-0x03 由 udp_fw_upgrade 库处理):
+ *   Start: 发 [0x01][size 4B LE][可选 32B keyhash], 固件回 [0x01][resp], 成功返回 true
+ *     resp: 0=失败, 1=成功, 2=keyhash 不一致被拒绝
  *   Data:  发 [0x02][data ≤511B], 固件回 [0x02][offset 4B LE], 校验 offset==*got_offset
  *   End:   发 [0x03][test_mode 1B][crc16 2B LE], 固件回 [0x03][1/0]
- * test_mode: 0=永久, 1=临时. 失败返回 false. */
-bool UdpManager_FirmwareStart(UdpManager *mgr, uint32_t size);
+ * test_mode: 0=永久, 1=临时. 失败返回 false.
+ * Start 的 out_resp (可为 NULL) 输出原始 resp, 供调用方区分 keyhash 拒绝 (2). */
+bool UdpManager_FirmwareStart(UdpManager *mgr, uint32_t size, const uint8_t *keyhash,
+			      uint8_t *out_resp);
 bool UdpManager_FirmwareData(UdpManager *mgr, const uint8_t *data, size_t len,
 			     uint32_t expected_offset, uint32_t *got_offset);
 bool UdpManager_FirmwareEnd(UdpManager *mgr, uint8_t test_mode, uint16_t crc16);
