@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +61,11 @@
 #define IDC_NET_PORT             1211   /* 设置用 数据端口 输入框 */
 #define IDC_NET_APPLY            1212   /* 设置按钮 */
 #define IDC_NET_QUERY            1213   /* 查询按钮 */
+/* Tab3 目标主机 (SET_HOST 0x18 / GET_HOST 0x19): 固件 nRF24 数据转发目标 */
+#define IDC_HOST_IP              1220   /* 上位机 IP 输入框 */
+#define IDC_HOST_PORT            1221   /* 上位机端口 输入框 */
+#define IDC_HOST_APPLY           1222   /* 目标主机 设置按钮 */
+#define IDC_HOST_QUERY           1223   /* 目标主机 查询按钮 */
 /* Tab4 设备查找 */
 #define IDC_DISC_START           1301   /* 开始/停止查找 按钮 */
 #define IDC_DISC_LIST            1302   /* 发现的 IP 列表 (LISTBOX) */
@@ -87,6 +93,7 @@ static int g_canTabChannel[CAN_TAB_COUNT];   /* 各 tab 已连接的 channel, -1
 #define UDP_TAB_COUNT 2
 static UdpManager *g_cfgUdp[UDP_TAB_COUNT];
 static int g_udpConnected[UDP_TAB_COUNT];
+static BOOL g_udpBroadcast[UDP_TAB_COUNT];  /* 目标 IP = 255.255.255.255 有限广播 */
 
 /* Tab4 设备查找: 原生 winsock 广播 GET_NET (0x13), 收集 2s 内响应源 IP.
  * 用独立 socket (本地端口 8602), 不走 UdpManager. g_discRunning=查找中. */
@@ -100,6 +107,10 @@ static volatile BOOL g_handlerAddrGot;
 /* 接收器 NRF (UDP GET_RF24) */
 static uint8_t g_receiverCh;
 static uint8_t g_receiverAddr[5];
+
+/* 接收器设备 MAC (GET_NET 学习, SET_NET 守卫用) */
+static uint8_t g_devMac[6];
+static BOOL g_macValid;
 
 static char g_handlerFwPath[MAX_PATH];
 static char g_receiverFwPath[MAX_PATH];
@@ -264,15 +275,15 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
     HWND hIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            66, yPos + 22, 85, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
+            66, yPos + 22, 89, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
     SendMessageW(hIp, WM_SETFONT, (WPARAM)hFont, TRUE);
     /* 本地端口 (bind). 固件监听 8601, 上位机本地端口收广播. 两 tab 默认都 8602 */
     HWND hLpLbl = CreateWindowExW(0, L"STATIC", L"本地端口:",
-            WS_CHILD | WS_VISIBLE, 156, yPos + 24, 56, 14, hDlg, NULL, g_hInst, NULL);
+            WS_CHILD | WS_VISIBLE, 164, yPos + 24, 56, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLpLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
     HWND hLocalPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"8602",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            216, yPos + 22, 44, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_LOCAL_PORT, g_hInst, NULL);
+            224, yPos + 22, 44, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_LOCAL_PORT, g_hInst, NULL);
     SendMessageW(hLocalPort, WM_SETFONT, (WPARAM)hFont, TRUE);
     HWND hUdpConn = CreateWindowExW(0, L"BUTTON", L"连接",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -347,11 +358,18 @@ static void SyncUdpConnState(int udpTabIdx)
         EnableWindow(GetDlgItem(h, IDC_UDP_IP), enable);
         EnableWindow(GetDlgItem(h, IDC_UDP_LOCAL_PORT), enable);
     }
-    /* Tab3 升级按钮 + 获取版本按钮启用条件 */
+    /* Tab3 升级/获取版本/目标主机按钮启用条件.
+     * 广播模式 (255.255.255.255) 下 GET_VERSION/升级/目标主机 仅对单台有意义, 禁用;
+     * GET_NET/SET_NET 不受影响 (广播发现 + MAC 守卫本就是广播用法).
+     * 目标主机按钮保持原默认行为 (始终可用), 仅广播连接时禁用, 断开即恢复. */
     if (udpTabIdx == UDP_TAB_CFG && g_hTabDlg[2]) {
+        BOOL bcast = g_udpBroadcast[udpTabIdx];
         EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_UPGRADE),
-                     connected && strlen(g_receiverFwPath) > 0 ? TRUE : FALSE);
-        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_GETVER), connected ? TRUE : FALSE);
+                     connected && !bcast && strlen(g_receiverFwPath) > 0 ? TRUE : FALSE);
+        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_GETVER),
+                     connected && !bcast ? TRUE : FALSE);
+        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_HOST_APPLY), bcast ? FALSE : TRUE);
+        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_HOST_QUERY), bcast ? FALSE : TRUE);
     }
 }
 
@@ -393,7 +411,8 @@ static void CreateTransmitterFwTabControls(HWND hDlg)
                            IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE);  /* y=6→196 */
 
     /* 网络参数 groupbox: 设置接收器 IP + 数据端口 (SET_NET 0x12).
-     * 掩码固定 255.255.255.0, 网关=IP 末段改 1, 固件自算, 不传. */
+     * 掩码固定 255.255.255.0, 网关=IP 末段改 1, 固件自算, 不传.
+     * (设备 MAC 由 GET_NET 内部学习供 SET_NET 守卫, 不在 UI 显示) */
     int ny = y;  /* 紧接 UDP groupbox 下方 */
     CreateWindowExW(0, L"BUTTON", L"网络参数",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
@@ -420,6 +439,35 @@ static void CreateTransmitterFwTabControls(HWND hDlg)
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, ny + 24, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_QUERY, g_hInst, NULL);
     SendMessageW(hQuery, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    /* 目标主机 groupbox: 固件 nRF24 数据转发目标 (SET_HOST 0x18 / GET_HOST 0x19).
+     * 上位机本地数据端口应 = host_port 才能收到转发数据. */
+    int hy = ny + 74;
+    CreateWindowExW(0, L"BUTTON", L"目标主机",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, hy, 436, 70, hDlg, NULL, g_hInst, NULL);
+    hLbl = CreateWindowExW(0, L"STATIC", L"上位机IP:",
+            WS_CHILD | WS_VISIBLE, 20, hy + 26, 50, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hHostIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            72, hy + 24, 96, 22, hDlg, (HMENU)(INT_PTR)IDC_HOST_IP, g_hInst, NULL);
+    SendMessageW(hHostIp, WM_SETFONT, (WPARAM)hFont, TRUE);
+    hLbl = CreateWindowExW(0, L"STATIC", L"端口:",
+            WS_CHILD | WS_VISIBLE, 176, hy + 26, 30, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hHostPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            208, hy + 24, 56, 22, hDlg, (HMENU)(INT_PTR)IDC_HOST_PORT, g_hInst, NULL);
+    SendMessageW(hHostPort, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hHostApply = CreateWindowExW(0, L"BUTTON", L"设置",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            300, hy + 24, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_HOST_APPLY, g_hInst, NULL);
+    SendMessageW(hHostApply, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hHostQuery = CreateWindowExW(0, L"BUTTON", L"查询",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            366, hy + 24, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_HOST_QUERY, g_hInst, NULL);
+    SendMessageW(hHostQuery, WM_SETFONT, (WPARAM)hFont, TRUE);
 }
 
 /* 创建 Tab4 设备查找控件: 开始/停止按钮 + IP 列表 + 复制按钮 */
@@ -582,29 +630,45 @@ static void OnUdpConnect(HWND hChildDlg)
         /* 断开 */
         UdpManager_Unbind(mgr);
         g_udpConnected[udpTab] = 0;
+        g_udpBroadcast[udpTab] = FALSE;
         SyncUdpConnState(udpTab);
+        /* Tab3 断开后 MAC 可能过期 (换设备重连), 清空避免误用 */
+        if (udpTab == UDP_TAB_CFG) {
+            g_macValid = FALSE;
+        }
         return;
     }
-    /* 取 IP 框内容 (纯单播: 必须是具体 IP, 拒绝空/广播地址) */
+    /* 取 IP 框内容. Tab1(绑定) 要求单播; Tab3(配置) 允许有限广播 255.255.255.255
+     * (广播 GET_NET 学 MAC + 广播 SET_NET 靠 MAC 守卫精准配置单台). 子网定向广播
+     * (x.x.x.255) 固件跨子网不可靠, 两 tab 均拒绝. */
     wchar_t wip[64] = { 0 };
     GetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_IP), wip, 64);
     char ip[64] = { 0 };
     WideCharToMultiByte(CP_ACP, 0, wip, -1, ip, sizeof(ip), NULL, NULL);
     if (!ip[0]) {
-        MessageBoxW(g_hMain, L"请填写接收器具体 IP 地址\n(本页只支持单播, 广播请用「设备查找」页)",
-                    L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请填写接收器 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
-    /* 校验: 拒绝有限广播 255.255.255.255 和子网定向广播 (x.x.x.255) */
-    unsigned long nip = inet_addr(ip);
-    if (nip == INADDR_NONE || nip == INADDR_ANY) {
-        MessageBoxW(g_hMain, L"IP 地址格式不正确", L"提示", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    if (strcmp(ip, "255.255.255.255") == 0 || (nip & 0xFF) == 0xFF) {
-        MessageBoxW(g_hMain, L"本页只支持单播 IP\n广播发现请用「设备查找」页", L"提示",
-                    MB_OK | MB_ICONWARNING);
-        return;
+    /* 有限广播 255.255.255.255: inet_addr 返回 INADDR_NONE (与错误同值), 用字符串识别 */
+    BOOL is_limited_bcast = (strcmp(ip, "255.255.255.255") == 0);
+    if (is_limited_bcast) {
+        if (udpTab == UDP_TAB_BIND) {
+            MessageBoxW(g_hMain, L"绑定页只支持单播 IP\n广播请用「接收端配置」或「设备查找」页",
+                        L"提示", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        /* Tab3 允许: 广播发现 + SET_NET MAC 守卫 */
+    } else {
+        unsigned long nip = inet_addr(ip);
+        if (nip == INADDR_NONE || nip == INADDR_ANY) {
+            MessageBoxW(g_hMain, L"IP 地址格式不正确", L"提示", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        if ((nip & 0xFF) == 0xFF) {
+            MessageBoxW(g_hMain, L"不支持子网定向广播 (x.x.x.255)\n请用 255.255.255.255 有限广播",
+                        L"提示", MB_OK | MB_ICONWARNING);
+            return;
+        }
     }
     /* 读本地端口 (默认 8602). 远程固定 8601 (配置端口), 单播到指定 IP.
      * Tab1 和 Tab3 独立实例, 默认端口同为 8602 (不会同时用, 用户每次只操作一个 tab). */
@@ -636,9 +700,10 @@ static void OnUdpConnect(HWND hChildDlg)
     }
     /* 验证通过 (Tab1) 或非 Tab1 (Tab3): 正式标记已连接 */
     g_udpConnected[udpTab] = 1;
+    g_udpBroadcast[udpTab] = is_limited_bcast;
     SyncUdpConnState(udpTab);
-    if (udpTab == UDP_TAB_CFG && GetDlgItem(hChildDlg, IDC_TFW_VERSION)) {
-        /* Tab3 连接成功后自动读版本 */
+    if (udpTab == UDP_TAB_CFG && !is_limited_bcast && GetDlgItem(hChildDlg, IDC_TFW_VERSION)) {
+        /* Tab3 单播连接成功后自动读版本 (广播模式跳过: 多设备版本歧义) */
         OnGetVersionUdp(hChildDlg);
     }
 }
@@ -747,11 +812,18 @@ static void OnDiscoverCopy(HWND hChildDlg)
     /* 不弹框, 静默复制 (避免打扰). */
 }
 
-/* 设置接收器网络参数 (SET_NET 0x12): IP + 数据端口. 掩码固定, 网关固件自算 */
+/* 设置接收器网络参数 (SET_NET 0x12): IP + 数据端口. 掩码固定, 网关固件自算.
+ * SET_NET 帧首 6B 为目标设备 MAC (固件单播/广播均校验匹配才执行),
+ * 故须先查询 (GET_NET) 拿到设备 MAC. */
 static void OnNetApply(HWND hChildDlg)
 {
     if (!g_udpConnected[UDP_TAB_CFG]) {
         MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (!g_macValid) {
+        MessageBoxW(g_hMain, L"请先点击\"查询\"获取设备 MAC, 再设置网络参数",
+                    L"缺少 MAC", MB_OK | MB_ICONWARNING);
         return;
     }
     wchar_t wip[64] = { 0 }, wport[16] = { 0 };
@@ -774,8 +846,8 @@ static void OnNetApply(HWND hChildDlg)
         MessageBoxW(g_hMain, L"数据端口必须在 1-65535 范围内", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
-    /* SET_NET: [ip 4B][port 2B BE], 掩码固定 255.255.255.0 网关自动派生 */
-    if (UdpManager_SetNet(g_cfgUdp[UDP_TAB_CFG], ip, (uint16_t)port)) {
+    /* SET_NET: [mac 6B][ip 4B][port 2B BE], 掩码固定 255.255.255.0 网关自动派生 */
+    if (UdpManager_SetNet(g_cfgUdp[UDP_TAB_CFG], g_devMac, ip, (uint16_t)port)) {
         MessageBoxW(g_hMain, L"网络参数已发送\n重启接收器后生效", L"成功",
                     MB_OK | MB_ICONINFORMATION);
     } else {
@@ -783,8 +855,63 @@ static void OnNetApply(HWND hChildDlg)
     }
 }
 
-/* 查询接收器网络参数 (GET_NET 0x13): 回填 IP + 数据端口到输入框 */
+/* 查询接收器网络参数 (GET_NET 0x13): 回填 IP + 数据端口 + MAC 到输入框.
+ * GET_NET 响应含设备 MAC, 学习后供后续 SET_NET 守卫. */
 static void OnNetQuery(HWND hChildDlg)
+{
+    if (!g_udpConnected[UDP_TAB_CFG]) {
+        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    uint8_t mac[6] = { 0 };
+    char ip[16] = { 0 };
+    uint16_t port = 0;
+    if (UdpManager_GetNet(g_cfgUdp[UDP_TAB_CFG], mac, ip, sizeof(ip), &port)) {
+        /* 学习设备 MAC (供后续 SET_NET 守卫, 不在 UI 显示) */
+        memcpy(g_devMac, mac, 6);
+        g_macValid = TRUE;
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_NET_IP), ip);
+        char port_str[8];
+        sprintf(port_str, "%d", port);
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_NET_PORT), port_str);
+    } else {
+        MessageBoxW(g_hMain, L"查询失败 (接收器未响应)", L"提示", MB_OK | MB_ICONWARNING);
+    }
+}
+
+/* 设置目标主机 (SET_HOST 0x18): 固件把 nRF24 数据固定单播到此 IP:端口.
+ * 上位机本地数据端口应与之相同才能收到转发的数据. */
+static void OnHostApply(HWND hChildDlg)
+{
+    if (!g_udpConnected[UDP_TAB_CFG]) {
+        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    wchar_t wip[64] = { 0 }, wport[16] = { 0 };
+    GetWindowTextW(GetDlgItem(hChildDlg, IDC_HOST_IP), wip, 64);
+    GetWindowTextW(GetDlgItem(hChildDlg, IDC_HOST_PORT), wport, 16);
+    char ip[64] = { 0 };
+    WideCharToMultiByte(CP_ACP, 0, wip, -1, ip, sizeof(ip), NULL, NULL);
+    if (!ip[0]) {
+        MessageBoxW(g_hMain, L"请填写上位机 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (inet_addr(ip) == INADDR_NONE) {
+        MessageBoxW(g_hMain, L"IP 地址格式不正确", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    int port = _wtoi(wport);
+    if (port <= 0 || port > 65535) port = 8602;
+    if (UdpManager_SetHost(g_cfgUdp[UDP_TAB_CFG], ip, (uint16_t)port)) {
+        MessageBoxW(g_hMain, L"目标主机已设置\n固件 nRF24 数据将转发到此地址", L"成功",
+                    MB_OK | MB_ICONINFORMATION);
+    } else {
+        MessageBoxW(g_hMain, L"设置失败 (发送命令失败)", L"错误", MB_OK | MB_ICONERROR);
+    }
+}
+
+/* 查询目标主机 (GET_HOST 0x19): 回填上位机 IP + 端口. */
+static void OnHostQuery(HWND hChildDlg)
 {
     if (!g_udpConnected[UDP_TAB_CFG]) {
         MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
@@ -792,11 +919,11 @@ static void OnNetQuery(HWND hChildDlg)
     }
     char ip[16] = { 0 };
     uint16_t port = 0;
-    if (UdpManager_GetNet(g_cfgUdp[UDP_TAB_CFG], ip, sizeof(ip), &port)) {
-        SetWindowTextA(GetDlgItem(hChildDlg, IDC_NET_IP), ip);
+    if (UdpManager_GetHost(g_cfgUdp[UDP_TAB_CFG], ip, sizeof(ip), &port)) {
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_HOST_IP), ip);
         char port_str[8];
         sprintf(port_str, "%d", port);
-        SetWindowTextA(GetDlgItem(hChildDlg, IDC_NET_PORT), port_str);
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_HOST_PORT), port_str);
     } else {
         MessageBoxW(g_hMain, L"查询失败 (接收器未响应)", L"提示", MB_OK | MB_ICONWARNING);
     }
@@ -1193,6 +1320,8 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
             break;
         case IDC_NET_APPLY:          OnNetApply(hChildDlg);    break;
         case IDC_NET_QUERY:          OnNetQuery(hChildDlg);    break;
+        case IDC_HOST_APPLY:         OnHostApply(hChildDlg);   break;
+        case IDC_HOST_QUERY:         OnHostQuery(hChildDlg);   break;
         case IDC_TFW_GETVER:         OnGetVersionUdp(hChildDlg); break;
         }
     } else if (tabIdx == 3) {
@@ -1210,7 +1339,7 @@ static void CreateTabLayout(HWND hWnd)
     /* Tab 控件位于顶部 */
     g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_TABS,
-            0, 0, 480, 360, hWnd, (HMENU)1, g_hInst, NULL);
+            0, 0, 480, 380, hWnd, (HMENU)1, g_hInst, NULL);
 
     /* 三个页签标题 */
     TCITEMW ti; ti.mask = TCIF_TEXT;
@@ -1251,6 +1380,10 @@ static void CreateTabLayout(HWND hWnd)
     CreateHandlerFwTabControls(g_hTabDlg[1]);
     CreateTransmitterFwTabControls(g_hTabDlg[2]);
     CreateDiscoverTabControls(g_hTabDlg[3]);
+
+    /* 初始按钮状态: 未连接 → 禁用依赖连接的操作 (升级/版本/目标主机) */
+    SyncUdpConnState(UDP_TAB_BIND);
+    SyncUdpConnState(UDP_TAB_CFG);
 }
 
 /* ===== 固件升级进度弹窗 (移植自 gateway-tool) ===== */
@@ -1531,8 +1664,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     wc.lpszClassName = L"ZCodeHandlerReceiver";
     RegisterClassW(&wc);
 
-    /* 主窗口尺寸 480x380 (含 tab 显示区) */
-    RECT rc = { 0, 0, 480, 380 };
+    /* 主窗口尺寸 480x400 (含 tab 显示区) */
+    RECT rc = { 0, 0, 480, 400 };
     AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX, FALSE, 0);
 
     int winW = rc.right - rc.left, winH = rc.bottom - rc.top;

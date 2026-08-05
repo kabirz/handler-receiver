@@ -16,7 +16,7 @@
 
 /* UDP 命令码 (命令帧首字节, 走配置端口 8601).
  * 0x01-0x05: udp_fw_upgrade 库内命令 (FW_START/DATA/END/GET_VERSION/REBOOT)
- * 0x12+:     应用业务命令 (分网络/RF24 两组, 各含 set/get).
+ * 0x12+:     应用业务命令 (分网络/RF24/HOST 三组, 各含 set/get).
  *            掩码固定 255.255.255.0, 网关 = IP 末段改 1, 均不在帧中传输. */
 enum udp_cmd {
 	UDP_CMD_FW_START    = 0x01,
@@ -24,12 +24,14 @@ enum udp_cmd {
 	UDP_CMD_FW_END      = 0x03,
 	UDP_CMD_GET_VERSION = 0x04,
 	UDP_CMD_REBOOT      = 0x05,
-	UDP_CMD_SET_NET     = 0x12,  /* [ip 4B][port 2B BE] = 6B → 回显同序 6B */
-	UDP_CMD_GET_NET     = 0x13,  /* (空) → [ip 4B][port 2B BE] = 6B */
+	UDP_CMD_SET_NET     = 0x12,  /* [mac 6B][ip 4B][port 2B BE] = 12B → 回显同序 12B (MAC 守卫) */
+	UDP_CMD_GET_NET     = 0x13,  /* (空) → [mac 6B][ip 4B][port 2B BE] = 12B (含本机 MAC) */
 	UDP_CMD_SET_RF24    = 0x14,  /* [ch 1B][addr 5B] = 6B → 回显同序 6B */
 	UDP_CMD_GET_RF24    = 0x15,  /* (空) → [ch 1B][addr 5B] = 6B */
 	UDP_CMD_SET_NET_MODE = 0x16, /* [mode 1B] (0=静态,1=DHCP) → 回显 1B (持久化, 重启生效) */
 	UDP_CMD_GET_NET_MODE = 0x17, /* (空) → [mode 1B] */
+	UDP_CMD_SET_HOST    = 0x18,  /* [host ip 4B][port 2B BE] = 6B → 回显同序 6B (持久化) */
+	UDP_CMD_GET_HOST    = 0x19,  /* (空) → [host ip 4B][port 2B BE] = 6B */
 };
 
 /* 通道类型: 一个 UdpManager 实例对应一个通道 (单 socket).
@@ -40,17 +42,20 @@ typedef enum {
 	UDP_CHAN_DATA,     /* 数据通道: 数据帧收发, data_cb 上报, msg_cb 不用 */
 } UdpChannel;
 
-/* 无线接收器配置 (GET_NET + GET_RF24 两组响应合并后的结果).
- *   GET_NET  (0x13): [ip 4B][port 2B BE] = 6B → ip/data_port
+/* 无线接收器配置 (GET_NET + GET_RF24 + GET_HOST 三组响应合并后的结果).
+ *   GET_NET  (0x13): [mac 6B][ip 4B][port 2B BE] = 12B → mac/ip/data_port
  *   GET_RF24 (0x15): [ch 1B][addr 5B] = 6B → rf24_channel/rf24_addr
+ *   GET_HOST (0x19): [host ip 4B][port 2B BE] = 6B → host_ip/host_port
  * 掩码固定 255.255.255.0; 网关 = IP 末段改 1 (上位机不传, 固件自算).
- * remote_data_port = data_port + 1 (上位机计算); config_port 恒为 8601 (硬编码). */
+ * config_port 恒为 8601 (硬编码). */
 typedef struct {
+	uint8_t mac[6];             /* 设备 MAC (GET_NET 回复带, 供 SET_NET 广播守卫) */
 	uint8_t rf24_channel;
 	uint8_t rf24_addr[5];
-	uint16_t data_port;        /* 本地数据端口 (固件 bind) */
-	uint16_t remote_data_port; /* 远程数据端口 = data_port+1 (上位机计算) */
-	char ip[16];               /* 固件 IP (点分十进制) */
+	uint16_t data_port;         /* 固件数据端口 (固件 bind) */
+	char ip[16];                /* 固件 IP (点分十进制) */
+	char host_ip[16];           /* 上位机目标 IP (固件 nRF24 数据转发目标) */
+	uint16_t host_port;         /* 上位机目标端口 (固件 nRF24 数据转发目标) */
 } GatewayConfig;
 
 /* 回调类型: 状态消息 / 透传数据 */
@@ -80,10 +85,12 @@ bool UdpManager_IsBound(UdpManager *mgr);
 bool UdpManager_SendData(UdpManager *mgr, const uint8_t *data, size_t len);
 bool UdpManager_SendCommand(UdpManager *mgr, uint8_t cmd, const uint8_t *data, uint8_t len);
 
-/* 无线接收器配置 — 分网络/RF24 两组, 各含 set/get (走配置实例).
- * 掩码固定 255.255.255.0, 网关 = IP 末段改 1, 固件自算, 上位机不传. */
-bool UdpManager_SetNet(UdpManager *mgr, const char *ip, uint16_t port);
-bool UdpManager_GetNet(UdpManager *mgr, char *ip, size_t ip_len, uint16_t *port);
+/* 无线接收器配置 — 分网络/RF24/HOST 三组, 各含 set/get (走配置实例).
+ * 掩码固定 255.255.255.0, 网关 = IP 末段改 1, 固件自算, 上位机不传.
+ * SET_NET 帧首 6B 为目标设备 MAC (固件校验: 单播/广播均须匹配才执行),
+ * 故调用前应先 GetNet 拿到设备 MAC. */
+bool UdpManager_SetNet(UdpManager *mgr, const uint8_t *mac, const char *ip, uint16_t port);
+bool UdpManager_GetNet(UdpManager *mgr, uint8_t *mac, char *ip, size_t ip_len, uint16_t *port);
 bool UdpManager_SetRF24(UdpManager *mgr, uint8_t ch, const uint8_t *addr);
 bool UdpManager_GetRF24(UdpManager *mgr, uint8_t *ch, uint8_t *addr);
 
@@ -91,6 +98,11 @@ bool UdpManager_GetRF24(UdpManager *mgr, uint8_t *ch, uint8_t *addr);
  * 持久化, 重启生效. SetNetMode 发后建议配合 Reboot. */
 bool UdpManager_SetNetMode(UdpManager *mgr, uint8_t mode);
 bool UdpManager_GetNetMode(UdpManager *mgr, uint8_t *mode);
+
+/* 上位机目标 (HOST) 配置 (走配置实例): 固件把 nRF24 数据固定单播到
+ * host_ip:host_port (默认 192.168.11.100:8602, 持久化). */
+bool UdpManager_SetHost(UdpManager *mgr, const char *ip, uint16_t port);
+bool UdpManager_GetHost(UdpManager *mgr, char *ip, size_t ip_len, uint16_t *port);
 
 /* 查询版本 (GET_VERSION): 同步等待, 填入 version 字符串 (NUL 终止).
  * buf_len 为 buf 容量. 返回 true 表示成功. */

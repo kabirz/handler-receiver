@@ -401,16 +401,24 @@ bool UdpManager_SendCommand(UdpManager *mgr, uint8_t cmd, const uint8_t *data, u
 	return udp_send_raw(mgr, buf, (int)(len + 1));
 }
 
-/* 设置网络参数: [ip 4B][port 2B BE] = 6B.
+/* 设置网络参数: [mac 6B][ip 4B][port 2B BE] = 12B.
+ * 首 6B 为目标设备 MAC (固件校验: 单播/广播均须 MAC 匹配才执行).
  * 掩码固定 255.255.255.0, 网关 = IP 末段改 1, 固件自算, 上位机不传. */
-bool UdpManager_SetNet(UdpManager *mgr, const char *ip, uint16_t port)
+bool UdpManager_SetNet(UdpManager *mgr, const uint8_t *mac, const char *ip, uint16_t port)
 {
-	uint8_t data[6] = {0};
-	struct in_addr a;
+	uint8_t data[12] = {0};
 
-	if (ip) { a.s_addr = inet_addr(ip); memcpy(data + 0, &a.s_addr, 4); }
-	data[4] = (port >> 8) & 0xFF;
-	data[5] = port & 0xFF;
+	if (mac) {
+		memcpy(data + 0, mac, 6);
+	}
+	if (ip) {
+		struct in_addr a;
+
+		a.s_addr = inet_addr(ip);
+		memcpy(data + 6, &a.s_addr, 4);
+	}
+	data[10] = (port >> 8) & 0xFF;
+	data[11] = port & 0xFF;
 
 	return UdpManager_SendCommand(mgr, UDP_CMD_SET_NET, data, sizeof(data));
 }
@@ -457,24 +465,28 @@ static bool send_and_wait(UdpManager *mgr, uint8_t cmd,
 	return (wr == WAIT_OBJECT_0) && (mgr->resp_len > 0);
 }
 
-/* 查询网络参数: (空) → [ip 4B][port 2B BE] = 6B.
+/* 查询网络参数: (空) → [mac 6B][ip 4B][port 2B BE] = 12B.
+ * mac 为 6B 出参缓冲 (可空, 存设备 MAC 供后续 SET_NET);
  * ip 为点分十进制输出缓冲 (容量 ip_len, 至少 16); port 出参 (可空). */
-bool UdpManager_GetNet(UdpManager *mgr, char *ip, size_t ip_len, uint16_t *port)
+bool UdpManager_GetNet(UdpManager *mgr, uint8_t *mac, char *ip, size_t ip_len, uint16_t *port)
 {
 	if (!ip || ip_len < 16) return false;
 
 	if (!send_and_wait(mgr, UDP_CMD_GET_NET, NULL, 0)) {
 		return false;
 	}
-	if (mgr->resp_len < 6) {
+	if (mgr->resp_len < 12) {
 		return false;
 	}
 
 	const uint8_t *p = mgr->resp_buf;
 
-	sprintf(ip, "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
+	if (mac) {
+		memcpy(mac, p, 6);
+	}
+	sprintf(ip, "%u.%u.%u.%u", p[6], p[7], p[8], p[9]);
 	if (port) {
-		*port = ((uint16_t)p[4] << 8) | p[5];
+		*port = ((uint16_t)p[10] << 8) | p[11];
 	}
 	return true;
 }
@@ -506,6 +518,46 @@ bool UdpManager_GetNetMode(UdpManager *mgr, uint8_t *mode)
 		return false;
 	}
 	if (mode) *mode = mgr->resp_buf[0];
+	return true;
+}
+
+/* 设置上位机目标: [host ip 4B][port 2B BE] = 6B. 持久化, 即时生效.
+ * 固件把 nRF24 数据固定单播到此 ip:port (不再广播/学习发送方). */
+bool UdpManager_SetHost(UdpManager *mgr, const char *ip, uint16_t port)
+{
+	uint8_t data[6] = {0};
+
+	if (ip) {
+		struct in_addr a;
+
+		a.s_addr = inet_addr(ip);
+		memcpy(data + 0, &a.s_addr, 4);
+	}
+	data[4] = (port >> 8) & 0xFF;
+	data[5] = port & 0xFF;
+
+	return UdpManager_SendCommand(mgr, UDP_CMD_SET_HOST, data, sizeof(data));
+}
+
+/* 查询上位机目标: (空) → [host ip 4B][port 2B BE] = 6B.
+ * ip 为点分十进制输出缓冲 (容量 ip_len, 至少 16); port 出参 (可空). */
+bool UdpManager_GetHost(UdpManager *mgr, char *ip, size_t ip_len, uint16_t *port)
+{
+	if (!ip || ip_len < 16) return false;
+
+	if (!send_and_wait(mgr, UDP_CMD_GET_HOST, NULL, 0)) {
+		return false;
+	}
+	if (mgr->resp_len < 6) {
+		return false;
+	}
+
+	const uint8_t *p = mgr->resp_buf;
+
+	sprintf(ip, "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
+	if (port) {
+		*port = ((uint16_t)p[4] << 8) | p[5];
+	}
 	return true;
 }
 
