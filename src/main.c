@@ -123,6 +123,43 @@ static volatile BOOL g_progressIsCan = FALSE;
 #define IDC_PROG_REBOOT 903
 #define FW_PROGRESS_CLASS L"ZCodeFwProgress"
 
+/* ===== 全局 UI 缩放 (1.5x) =====
+ * 所有控件按原坐标创建后, 由 ScaleChildWindows 后处理缩放, 无需改动创建代码.
+ * S(n)=n*3/2 整数运算; g_hUiFont 是放大后的统一字体 (替代 DEFAULT_GUI_FONT). */
+#define UI_SCALE_NUM  3
+#define UI_SCALE_DEN  2
+static int S(int v) { return v * UI_SCALE_NUM / UI_SCALE_DEN; }
+static HFONT g_hUiFont = NULL;
+
+/* 缩放 parent 的所有直接子窗口: 坐标/尺寸×SCALE + 换 g_hUiFont.
+ * groupbox 是空容器 (控件是其 sibling 而非 child), 遍历直接子窗口即覆盖全部控件.
+ * 非 groupbox 控件 (标签/按钮/编辑框/下拉框) 高度额外 +UI_HPAD 补偿:
+ * 原始 h=22 是为 9pt 字体设计, ×1.5=33 给 13.5pt 偏紧, 文字会被上下裁, 加 6px 留白. */
+#define UI_HPAD  6
+static void ScaleChildWindows(HWND parent)
+{
+    HWND h = GetWindow(parent, GW_CHILD);
+    while (h) {
+        RECT rc;
+        GetWindowRect(h, &rc);
+        MapWindowPoints(NULL, parent, (LPPOINT)&rc, 2);
+        int w = S(rc.right - rc.left);
+        int hh = S(rc.bottom - rc.top);
+        /* groupbox (BS_GROUPBOX) 高度不动 (改了会破坏间距); 其余控件高度 +UI_HPAD */
+        wchar_t cls[16] = { 0 };
+        GetClassNameW(h, cls, sizeof(cls) / sizeof(cls[0]));
+        LONG_PTR style = GetWindowLongPtrW(h, GWL_STYLE);
+        bool is_groupbox = (wcscmp(cls, L"Button") == 0 &&
+                            (style & BS_GROUPBOX) == BS_GROUPBOX);
+        if (!is_groupbox) hh += UI_HPAD;
+        SetWindowPos(h, NULL, S(rc.left), S(rc.top), w, hh, SWP_NOZORDER);
+        if (g_hUiFont) {
+            SendMessageW(h, WM_SETFONT, (WPARAM)g_hUiFont, TRUE);
+        }
+        h = GetWindow(h, GW_HWNDNEXT);
+    }
+}
+
 /* 子对话框过程: 三个 tab 页共用, 通过 GWL_USERDATA 标记 tab 索引区分.
  * 控件命令统一转发到主窗口的 OnTabCommand 处理 (避免逻辑分散). */
 static LRESULT CALLBACK TabChildDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -505,14 +542,14 @@ static void CreateDiscoverTabControls(HWND hDlg)
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             150, 20, 120, 28, hDlg, (HMENU)(INT_PTR)IDC_DISC_COPY, g_hInst, NULL);
     SendMessageW(hCopy, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 列表标题提示 */
+    /* 列表标题提示 (y 留足间距: 按钮缩放后 +UI_HPAD 会增高, 标题下移避开) */
     HWND hLbl = CreateWindowExW(0, L"STATIC", L"发现的设备 (IP:配置端口)",
-            WS_CHILD | WS_VISIBLE, 20, 50, 200, 14, hDlg, NULL, g_hInst, NULL);
+            WS_CHILD | WS_VISIBLE, 20, 56, 200, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
     /* 发现的设备列表 (LISTBOX, 支持单选), 条目格式 "ip:config_port" */
     HWND hList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP,
-            20, 68, 300, 192, hDlg, (HMENU)(INT_PTR)IDC_DISC_LIST, g_hInst, NULL);
+            20, 80, 300, 172, hDlg, (HMENU)(INT_PTR)IDC_DISC_LIST, g_hInst, NULL);
     SendMessageW(hList, WM_SETFONT, (WPARAM)hFont, TRUE);
 }
 
@@ -1357,10 +1394,10 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
 /* 创建 Tab 控件 + 3 个子对话框, 在 WM_CREATE 中调用 */
 static void CreateTabLayout(HWND hWnd)
 {
-    /* Tab 控件位于顶部 (高 324: 内容最高 Tab2≈276 + 标题栏 24 + 边距余量) */
+    /* Tab 控件位于顶部 (尺寸×SCALE; 实际放大量由 InitInstance 的主窗口容纳) */
     g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_TABS,
-            0, 0, 480, 324, hWnd, (HMENU)1, g_hInst, NULL);
+            0, 0, S(480), S(324), hWnd, (HMENU)1, g_hInst, NULL);
 
     /* 四个页签标题 (从左到右: 接收机配置 / 手柄绑定 / 固件升级 / 设备查找) */
     TCITEMW ti; ti.mask = TCIF_TEXT;
@@ -1373,8 +1410,8 @@ static void CreateTabLayout(HWND hWnd)
     ti.pszText = (LPWSTR)L"设备查找";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 3, (LPARAM)&ti);
 
-    /* Tab 标题字体: 系统默认是粗体 (菜单字体), 改为 Segoe UI 9pt 常规, 更清爽 */
-    HFONT hTabFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    /* Tab 标题字体: Segoe UI 常规, 字号×SCALE (1.5x → -18) */
+    HFONT hTabFont = CreateFontW(S(-12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     SendMessageW(g_hTab, WM_SETFONT, (WPARAM)hTabFont, TRUE);
@@ -1401,6 +1438,12 @@ static void CreateTabLayout(HWND hWnd)
     CreateBindTabControls(g_hTabDlg[1]);
     CreateFwUpgradeTabControls(g_hTabDlg[2]);
     CreateDiscoverTabControls(g_hTabDlg[3]);
+
+    /* 全局 1.5x 缩放: 控件已按原坐标建完, 这里后处理缩放每个 tab 子对话框的子控件 + 换字体.
+     * tab 子对话框自身尺寸已由 rcTab (来自缩放后的 g_hTab) 确定, 无需再缩. */
+    for (int i = 0; i < 4; i++) {
+        ScaleChildWindows(g_hTabDlg[i]);
+    }
 
     /* 初始按钮状态: 未连接 → 禁用依赖连接的操作 (升级/版本/目标主机) */
     SyncUdpConnState(UDP_TAB_BIND);
@@ -1463,7 +1506,8 @@ static void FW_ShowProgress(HWND hParent)
     }
     DWORD exStyle = WS_EX_DLGMODALFRAME;
     DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
-    RECT rc = { 0, 0, 300, 150 };
+    /* 进度窗尺寸×SCALE (300x150 → 450x225) */
+    RECT rc = { 0, 0, S(300), S(150) };
     AdjustWindowRectEx(&rc, style, FALSE, exStyle);
     int winW = rc.right - rc.left, winH = rc.bottom - rc.top;
 
@@ -1477,12 +1521,14 @@ static void FW_ShowProgress(HWND hParent)
     int y = rcParent.top + ((rcParent.bottom - rcParent.top) - (rcDlg.bottom - rcDlg.top)) / 2;
     SetWindowPos(g_progressDlg, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
 
+    /* 控件按原坐标创建, 下方统一 ScaleChildWindows 缩放.
+     * 进度窗字体用更大一号 (原 -14 ×SCALE = -21). */
+    HFONT hFont = CreateFontW(S(-14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     g_progressLabel = CreateWindowExW(0, L"STATIC", L"准备升级...",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
             20, 18, 260, 24, g_progressDlg, (HMENU)IDC_PROG_LABEL, g_hInst, NULL);
-    HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     SendMessageW(g_progressLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
     g_progressBar = CreateWindowExW(0, PROGRESS_CLASSW, NULL,
             WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
@@ -1496,6 +1542,12 @@ static void FW_ShowProgress(HWND hParent)
     g_progressReboot = CreateWindowExW(0, L"BUTTON", L"重启设备",
             WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
             0, 0, 0, 0, g_progressDlg, (HMENU)IDC_PROG_REBOOT, g_hInst, NULL);
+    SendMessageW(g_progressReboot, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 缩放进度窗内所有子控件 (坐标/尺寸×SCALE; ScaleChildWindows 会把字体设成 g_hUiFont,
+     * 进度窗需更大字体, 故缩放后再恢复 hFont). */
+    ScaleChildWindows(g_progressDlg);
+    SendMessageW(g_progressLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(g_progressBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
     SendMessageW(g_progressReboot, WM_SETFONT, (WPARAM)hFont, TRUE);
     ShowWindow(g_progressDlg, SW_SHOWNORMAL);
     UpdateWindow(g_progressDlg);
@@ -1516,22 +1568,23 @@ static void FW_Done(HWND hParent, BOOL success)
     ShowWindow(g_progressBar, SW_HIDE);
     SetWindowLongPtrW(g_progressLabel, GWL_STYLE,
             WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE);
-    SetWindowPos(g_progressLabel, HWND_TOP, 20, 25, 260, 48, SWP_NOZORDER);
+    /* 运行时动态定位: 进度窗已缩放, 子控件坐标须×SCALE 保持对齐 */
+    SetWindowPos(g_progressLabel, HWND_TOP, S(20), S(25), S(260), S(48), SWP_NOZORDER);
     if (success) {
         SetWindowTextW(g_progressLabel, L"升级完成！\n点击重启设备生效");
         SetWindowTextW(g_progressBtn, L"确定");
         EnableWindow(g_progressBtn, TRUE);
-        SetWindowPos(g_progressBtn, HWND_TOP, 165, 92, 80, 28, SWP_SHOWWINDOW);
+        SetWindowPos(g_progressBtn, HWND_TOP, S(165), S(92), S(80), S(28), SWP_SHOWWINDOW);
         SetWindowTextW(g_progressReboot, L"重启设备");
         EnableWindow(g_progressReboot, TRUE);
-        SetWindowPos(g_progressReboot, HWND_TOP, 55, 92, 95, 28, SWP_SHOWWINDOW);
+        SetWindowPos(g_progressReboot, HWND_TOP, S(55), S(92), S(95), S(28), SWP_SHOWWINDOW);
     } else {
         SetWindowTextW(g_progressLabel, L"升级失败\n请重试或检查设备连接");
         ShowWindow(g_progressReboot, SW_HIDE);
         EnableWindow(g_progressReboot, FALSE);
         SetWindowTextW(g_progressBtn, L"确定");
         EnableWindow(g_progressBtn, TRUE);
-        SetWindowPos(g_progressBtn, HWND_TOP, 110, 92, 80, 28, SWP_SHOWWINDOW);
+        SetWindowPos(g_progressBtn, HWND_TOP, S(110), S(92), S(80), S(28), SWP_SHOWWINDOW);
     }
     EnableWindow(hParent, TRUE);
     SetForegroundWindow(g_progressDlg);
@@ -1685,8 +1738,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     wc.lpszClassName = L"ZCodeHandlerReceiver";
     RegisterClassW(&wc);
 
-    /* 主窗口尺寸 480x344 (含 tab 显示区 324 + 标题栏/边框) */
-    RECT rc = { 0, 0, 480, 344 };
+    /* 统一放大字体 (DEFAULT_GUI_FONT 9pt → 1.5x ≈ 13.5pt = -18), 供所有控件缩放后使用 */
+    g_hUiFont = CreateFontW(S(-12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    /* 主窗口尺寸 480x344 ×SCALE (1.5x → 720x516 客户区, 含 tab 显示区) */
+    RECT rc = { 0, 0, S(480), S(344) };
     AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX, FALSE, 0);
 
     int winW = rc.right - rc.left, winH = rc.bottom - rc.top;
