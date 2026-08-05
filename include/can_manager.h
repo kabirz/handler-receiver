@@ -10,6 +10,7 @@
 #define CAN_ID_PLATFORM_TX  0x102
 #define CAN_ID_FW_DATA_RX   0x103
 #define CAN_ID_KEYHASH_RX   0x104
+#define CAN_ID_VERSION_STR  0x105  /* 手柄→平台: 版本字符串分帧 [seq 1B][text 7B] */
 #define CAN_ID_RF24_CONFIG_CMD  0x110
 #define CAN_ID_RF24_CONFIG_RESP 0x111
 #define CAN_ID_HANDLER_STATE 0x1E3
@@ -75,7 +76,10 @@ bool CanManager_Send(CanManager *mgr, uint32_t id, const uint8_t *data, uint8_t 
 bool CanManager_SendFrame(CanManager *mgr, const CanFrame *frame);
 
 /* 设备控制 (版本查询 / 重启) */
-bool CanManager_GetVersion(CanManager *mgr, uint32_t *version);
+/* 查询固件版本字符串 (多帧 0x105 拼接). 发 0x101 cmd=VERSION(2), 收 0x102 code=VERSION
+ * (offset=字符串总长度) 后, 收集 N 帧 0x105 [seq 1B][text 7B] 按 seq 拼接, 遇 '\0' 截断.
+ * buf 为输出缓冲 (NUL 终止), buf_len 为容量. 返回 true = 成功收到完整字符串. */
+bool CanManager_GetVersionStr(CanManager *mgr, char *buf, size_t buf_len);
 bool CanManager_Reboot(CanManager *mgr);
 
 /* 固件升级 (阻塞, 内部按 8 字节分帧并同步等待 ACK).

@@ -321,16 +321,24 @@ bool UdpManager_Bind(UdpManager *mgr, UdpChannel chan,
 	mgr->bound = true;
 
 	if (mgr->msg_cb) {
+		/* local_port=0 时 OS 分配临时端口, getsockname 取实际端口显示.
+		 * (提示消息是唯一需要真实端口的地方; 业务收发不依赖此值) */
+		uint16_t actual_port = local_port;
+		struct sockaddr_in bound_addr;
+		int balen = sizeof(bound_addr);
+		if (getsockname(mgr->sock, (struct sockaddr *)&bound_addr, &balen) == 0) {
+			actual_port = ntohs(bound_addr.sin_port);
+		}
 		const char *chan_name = (chan == UDP_CHAN_CONFIG) ? "配置" : "数据";
 		char buf[128];
 		if (unicast) {
 			sprintf(buf, "UDP %s通道已连接: 本地 %d → %s:%d", chan_name,
-				local_port, remote_ip, remote_port);
+				actual_port, remote_ip, remote_port);
 		} else {
 			struct in_addr b;
 			b.s_addr = mgr->remote_addr.sin_addr.s_addr;
 			sprintf(buf, "UDP %s通道已连接: 本地 %d → 广播 %s:%d", chan_name,
-				local_port, inet_ntoa(b), remote_port);
+				actual_port, inet_ntoa(b), remote_port);
 		}
 		mgr->msg_cb(buf, mgr->msg_data);
 	}
@@ -401,44 +409,38 @@ bool UdpManager_SendCommand(UdpManager *mgr, uint8_t cmd, const uint8_t *data, u
 	return udp_send_raw(mgr, buf, (int)(len + 1));
 }
 
-/* 设置网络参数: [mac 6B][ip 4B][port 2B BE] = 12B.
- * 首 6B 为目标设备 MAC (固件校验: 单播/广播均须 MAC 匹配才执行).
+/* 设置设备静态 IP: [ip 4B BE] = 4B → [1B: 1=成功/0=失败].
+ * 持久化, 重启生效. 失败: IP 非法 (0.0.0.0/环回/组播/广播/保留段) 或 DHCP 模式.
  * 掩码固定 255.255.255.0, 网关 = IP 末段改 1, 固件自算, 上位机不传. */
-bool UdpManager_SetNet(UdpManager *mgr, const uint8_t *mac, const char *ip, uint16_t port)
+bool UdpManager_SetIp(UdpManager *mgr, const char *ip, bool *out_ok)
 {
-	uint8_t data[12] = {0};
+	uint8_t data[4] = {0};
 
-	if (mac) {
-		memcpy(data + 0, mac, 6);
-	}
 	if (ip) {
 		struct in_addr a;
 
 		a.s_addr = inet_addr(ip);
-		memcpy(data + 6, &a.s_addr, 4);
+		if (a.s_addr == INADDR_NONE) return false;
+		memcpy(data, &a.s_addr, 4);
 	}
-	data[10] = (port >> 8) & 0xFF;
-	data[11] = port & 0xFF;
 
-	return UdpManager_SendCommand(mgr, UDP_CMD_SET_NET, data, sizeof(data));
+	uint8_t resp = 0;
+	int n = fw_exchange(mgr, UDP_CMD_SET_IP, data, 4, &resp, 1, UDP_RESP_TIMEOUT_MS);
+
+	bool ok = (n == 1 && resp == 1);
+	if (out_ok) *out_ok = ok;
+	/* 收到回复 (无论成功/失败) 即返回 true; out_ok 区分结果 */
+	return (n == 1);
 }
 
-/* 设置 RF24 参数: [ch 1B][addr 5B] = 6B. */
-bool UdpManager_SetRF24(UdpManager *mgr, uint8_t ch, const uint8_t *addr)
+/* 设置 RF24 地址: [addr 5B] = 5B → 回显 5B. 信道固定 1, 不在帧中. */
+bool UdpManager_SetRF24(UdpManager *mgr, const uint8_t *addr)
 {
-	uint8_t data[6] = {0};
+	uint8_t data[5] = {0};
 
-	data[0] = ch;
-	if (addr) memcpy(data + 1, addr, 5);
+	if (addr) memcpy(data, addr, 5);
 
 	return UdpManager_SendCommand(mgr, UDP_CMD_SET_RF24, data, sizeof(data));
-}
-
-/* 设置网络模式: [mode 1B] (0=静态, 1=DHCP). 持久化, 重启生效. */
-bool UdpManager_SetNetMode(UdpManager *mgr, uint8_t mode)
-{
-	uint8_t data = mode;
-	return UdpManager_SendCommand(mgr, UDP_CMD_SET_NET_MODE, &data, sizeof(data));
 }
 
 /* 通用: 发送命令并同步等待同命令码的响应.
@@ -465,64 +467,51 @@ static bool send_and_wait(UdpManager *mgr, uint8_t cmd,
 	return (wr == WAIT_OBJECT_0) && (mgr->resp_len > 0);
 }
 
-/* 查询网络参数: (空) → [mac 6B][ip 4B][port 2B BE] = 12B.
- * mac 为 6B 出参缓冲 (可空, 存设备 MAC 供后续 SET_NET);
- * ip 为点分十进制输出缓冲 (容量 ip_len, 至少 16); port 出参 (可空). */
-bool UdpManager_GetNet(UdpManager *mgr, uint8_t *mac, char *ip, size_t ip_len, uint16_t *port)
+/* 查询网络参数: (空) → [data_port 2B][host_ip 4B][host_port 2B] = 8B.
+ * host_ip 为点分十进制输出缓冲 (容量 host_ip_len, 至少 16); 三组出参均可空.
+ * 注: 配置端口不在此响应中, 需用 Discover 获取. */
+bool UdpManager_GetNet(UdpManager *mgr, uint16_t *data_port,
+		       char *host_ip, size_t host_ip_len, uint16_t *host_port)
 {
-	if (!ip || ip_len < 16) return false;
+	if (host_ip && host_ip_len < 16) return false;
 
 	if (!send_and_wait(mgr, UDP_CMD_GET_NET, NULL, 0)) {
 		return false;
 	}
-	if (mgr->resp_len < 12) {
+	if (mgr->resp_len < 8) {
 		return false;
 	}
 
 	const uint8_t *p = mgr->resp_buf;
 
-	if (mac) {
-		memcpy(mac, p, 6);
+	if (data_port) {
+		*data_port = ((uint16_t)p[0] << 8) | p[1];
 	}
-	sprintf(ip, "%u.%u.%u.%u", p[6], p[7], p[8], p[9]);
-	if (port) {
-		*port = ((uint16_t)p[10] << 8) | p[11];
+	if (host_ip) {
+		sprintf(host_ip, "%u.%u.%u.%u", p[2], p[3], p[4], p[5]);
+	}
+	if (host_port) {
+		*host_port = ((uint16_t)p[6] << 8) | p[7];
 	}
 	return true;
 }
 
-/* 查询 RF24 参数: (空) → [ch 1B][addr 5B] = 6B. addr 为 5B 出参缓冲 (可空). */
-bool UdpManager_GetRF24(UdpManager *mgr, uint8_t *ch, uint8_t *addr)
+/* 查询 RF24 地址: (空) → [addr 5B] = 5B. 信道固定 1, 不返回. addr 为 5B 出参缓冲 (可空). */
+bool UdpManager_GetRF24(UdpManager *mgr, uint8_t *addr)
 {
 	if (!send_and_wait(mgr, UDP_CMD_GET_RF24, NULL, 0)) {
 		return false;
 	}
-	if (mgr->resp_len < 6) {
+	if (mgr->resp_len < 5) {
 		return false;
 	}
 
-	const uint8_t *p = mgr->resp_buf;
-
-	if (ch) *ch = p[0];
-	if (addr) memcpy(addr, p + 1, 5);
+	if (addr) memcpy(addr, mgr->resp_buf, 5);
 	return true;
 }
 
-/* 查询网络模式: (空) → [mode 1B] (0=静态, 1=DHCP). */
-bool UdpManager_GetNetMode(UdpManager *mgr, uint8_t *mode)
-{
-	if (!send_and_wait(mgr, UDP_CMD_GET_NET_MODE, NULL, 0)) {
-		return false;
-	}
-	if (mgr->resp_len < 1) {
-		return false;
-	}
-	if (mode) *mode = mgr->resp_buf[0];
-	return true;
-}
-
-/* 设置上位机目标: [host ip 4B][port 2B BE] = 6B. 持久化, 即时生效.
- * 固件把 nRF24 数据固定单播到此 ip:port (不再广播/学习发送方). */
+/* 设置上位机目标: [host_ip 4B BE][port 2B BE] = 6B → 同序回显 6B. 持久化, 即时生效.
+ * 固件把 nRF24 数据固定单播到此 ip:port (不再广播/学习发送方). 仅发命令, 不等回复. */
 bool UdpManager_SetHost(UdpManager *mgr, const char *ip, uint16_t port)
 {
 	uint8_t data[6] = {0};
@@ -539,13 +528,14 @@ bool UdpManager_SetHost(UdpManager *mgr, const char *ip, uint16_t port)
 	return UdpManager_SendCommand(mgr, UDP_CMD_SET_HOST, data, sizeof(data));
 }
 
-/* 查询上位机目标: (空) → [host ip 4B][port 2B BE] = 6B.
- * ip 为点分十进制输出缓冲 (容量 ip_len, 至少 16); port 出参 (可空). */
-bool UdpManager_GetHost(UdpManager *mgr, char *ip, size_t ip_len, uint16_t *port)
+/* DISCOVER (0x15): 广播发现设备. (空) → [ip 4B BE][config_port 2B BE] = 6B.
+ * ip 为设备本机 IP (点分十进制, 容量 ip_len ≥ 16); config_port 出参可空.
+ * 同步等待回复 (500ms 超时). */
+bool UdpManager_Discover(UdpManager *mgr, char *ip, size_t ip_len, uint16_t *config_port)
 {
-	if (!ip || ip_len < 16) return false;
+	if (ip && ip_len < 16) return false;
 
-	if (!send_and_wait(mgr, UDP_CMD_GET_HOST, NULL, 0)) {
+	if (!send_and_wait(mgr, UDP_CMD_DISCOVER, NULL, 0)) {
 		return false;
 	}
 	if (mgr->resp_len < 6) {
@@ -554,9 +544,11 @@ bool UdpManager_GetHost(UdpManager *mgr, char *ip, size_t ip_len, uint16_t *port
 
 	const uint8_t *p = mgr->resp_buf;
 
-	sprintf(ip, "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
-	if (port) {
-		*port = ((uint16_t)p[4] << 8) | p[5];
+	if (ip) {
+		sprintf(ip, "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
+	}
+	if (config_port) {
+		*config_port = ((uint16_t)p[4] << 8) | p[5];
 	}
 	return true;
 }

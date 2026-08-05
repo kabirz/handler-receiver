@@ -24,6 +24,14 @@ struct CanManager {
 	CanFrame fw_response;
 	volatile bool fw_got_response;
 
+	/* 版本字符串多帧拼接 (RX 线程收集 0x105, GetVersionStr 轮询读取).
+	 * ver_query_active=查询进行中; ver_total=预期帧数; ver_got[seq]=该帧已收;
+	 * ver_text[seq] 存 7B 文本片段. 最多 32 帧 = 224B (版本串足够). */
+	volatile bool ver_query_active;
+	uint8_t ver_total;
+	volatile bool ver_got[32];
+	char ver_text[32][7];
+
 	/* 最近一次 Connect 失败的 PCAN status (0=OK). 供上层友好提示占用/不存在 */
 	uint32_t last_error;
 };
@@ -67,8 +75,10 @@ bool CanManager_Connect(CanManager *mgr, int channel, int baudrate)
 	mgr->channel = (TPCANHandle)channel;
 	mgr->connected = true;
 
-	/* 配置接收过滤器: 固件响应、RF24 配置、手柄状态/心跳 */
+	/* 配置接收过滤器: 固件响应(0x102)、版本字符串(0x105)、RF24 配置(0x111)、手柄状态/心跳.
+	 * 0x105 单独加 (不与 0x102 连号范围, 各精确匹配), 否则版本多帧被驱动层丢弃. */
 	Pcan_FilterMessages(mgr->channel, CAN_ID_PLATFORM_TX, CAN_ID_PLATFORM_TX, 0);
+	Pcan_FilterMessages(mgr->channel, CAN_ID_VERSION_STR, CAN_ID_VERSION_STR, 0);
 	Pcan_FilterMessages(mgr->channel, CAN_ID_RF24_CONFIG_RESP, CAN_ID_RF24_CONFIG_RESP, 0);
 	Pcan_FilterMessages(mgr->channel, CAN_ID_HANDLER_STATE, CAN_ID_HEARTBEAT, 0);
 
@@ -175,14 +185,52 @@ static DWORD WINAPI rx_thread_proc(LPVOID param)
 		LeaveCriticalSection(&mgr->cs);
 
 		if (status == PCAN_ERROR_OK) {
-			/* 固件响应帧: 存入 fw_response 并唤醒升级线程 */
+			/* 固件响应帧 (0x102): 存入 fw_response 并唤醒等待者.
+			 * 若是 VERSION 响应 (code=2), offset = 版本字符串总长度,
+			 * 据此算预期 0x105 帧数并开启多帧收集模式. */
 			if (msg.id == CAN_ID_PLATFORM_TX) {
 				EnterCriticalSection(&mgr->cs);
 				mgr->fw_response.id = msg.id;
 				mgr->fw_response.dlc = msg.len;
 				memcpy(mgr->fw_response.data, msg.data, msg.len);
 				mgr->fw_got_response = true;
+				/* VERSION 响应: offset=字符串总字节数, 据此算 0x105 帧数 (每帧 7B).
+				 * 重置 ver_got, 标记查询进行中, 让 GetVersionStr 轮询收集. */
+				if (msg.len >= 1 && msg.data[0] == FW_CODE_VERSION) {
+					uint32_t total_len = 0;
+					if (msg.len >= 8) {
+						total_len = (uint32_t)msg.data[4] |
+							    ((uint32_t)msg.data[5] << 8) |
+							    ((uint32_t)msg.data[6] << 16) |
+							    ((uint32_t)msg.data[7] << 24);
+					}
+					/* 帧数 = ceil(total_len / 7), 上限 32 */
+					uint8_t frames = (uint8_t)((total_len + 6) / 7);
+					if (frames > 32) frames = 32;
+					mgr->ver_total = frames;
+					for (int i = 0; i < 32; i++) {
+						mgr->ver_got[i] = false;
+					}
+					mgr->ver_query_active = true;
+				}
 				SetEvent(mgr->fw_event);
+				LeaveCriticalSection(&mgr->cs);
+			}
+
+			/* 版本字符串分帧 (0x105): [seq 1B][text 7B]. 查询进行中时按 seq 存入缓冲. */
+			if (msg.id == CAN_ID_VERSION_STR && mgr->ver_query_active && msg.len >= 1) {
+				uint8_t seq = msg.data[0];
+				EnterCriticalSection(&mgr->cs);
+				if (seq < 32) {
+					uint8_t txt_len = msg.len - 1;
+					if (txt_len > 7) txt_len = 7;
+					memcpy(mgr->ver_text[seq], msg.data + 1, txt_len);
+					/* 不足 7B 的末帧补 '\0' 填充 (协议约定), 便于拼接时统一截断 */
+					if (txt_len < 7) {
+						memset(mgr->ver_text[seq] + txt_len, 0, 7 - txt_len);
+					}
+					mgr->ver_got[seq] = true;
+				}
 				LeaveCriticalSection(&mgr->cs);
 			}
 
@@ -253,26 +301,79 @@ static bool wait_fw_response(CanManager *mgr, uint32_t timeout_ms, uint32_t *cod
 /* ================================================================
  * 控制命令
  * ================================================================ */
-bool CanManager_GetVersion(CanManager *mgr, uint32_t *version)
+/* 查询版本字符串 (新版固件: 多帧拼接).
+ * 流程: 发 0x101 cmd=VERSION(2) → 收 0x102 code=VERSION (offset=字符串总长,
+ * RX 线程据此开启 ver_query_active 多帧收集) → 收集 N 帧 0x105 → 拼接写入 buf.
+ * 超时 500ms 等 0x102, 之后轮询 2s 收齐 0x105 帧. */
+bool CanManager_GetVersionStr(CanManager *mgr, char *buf, size_t buf_len)
 {
-	if (!version) return false;
+	if (!mgr || !buf || buf_len == 0) return false;
+	buf[0] = '\0';
 
 	uint8_t data[8] = {0};
 	data[0] = FW_CMD_VERSION;
+
+	mgr->ver_query_active = false;
+	mgr->ver_total = 0;
+
+	/* 先清等待状态再发命令, 避免 0x102 在 Send 返回与 wait_fw_response 重置之间到达
+	 * 被吞掉 (CAN 250K 两帧往返 <1ms, 极易触发). 重置后由 RX 线程置 fw_got_response. */
+	ResetEvent(mgr->fw_event);
+	mgr->fw_got_response = false;
 
 	if (!CanManager_Send(mgr, CAN_ID_PLATFORM_RX, data, 8)) {
 		return false;
 	}
 
-	/* 等待版本响应, 超时 500ms */
-	uint32_t code = 0, val = 0;
-	if (wait_fw_response(mgr, 500, &code, &val)) {
-		if (code == FW_CODE_VERSION) {
-			*version = val;
-			return true;
+	/* 等 0x102 VERSION 响应 (offset=字符串总长). RX 线程收到后会置 ver_query_active. */
+	DWORD result = WaitForSingleObject(mgr->fw_event, 500);
+	if (result != WAIT_OBJECT_0 || !mgr->fw_got_response) {
+		return false;
+	}
+	uint32_t code = mgr->fw_response.data[0];
+	if (code != FW_CODE_VERSION) {
+		return false;
+	}
+
+	/* 轮询等待所有 ver_total 帧到齐 (每 10ms 检查一次, 总超时 2s) */
+	uint8_t total = mgr->ver_total;
+	if (total == 0) {
+		/* 字符串长度为 0: 无 0x105 帧, 直接返回空串 */
+		return true;
+	}
+	for (int waited = 0; waited < 2000; waited += 10) {
+		bool all = true;
+		EnterCriticalSection(&mgr->cs);
+		for (uint8_t i = 0; i < total; i++) {
+			if (!mgr->ver_got[i]) { all = false; break; }
+		}
+		LeaveCriticalSection(&mgr->cs);
+		if (all) break;
+		Sleep(10);
+	}
+
+	/* 按 seq 拼接 text, 遇 '\0' 截断. NUL 终止写入 buf.
+	 * 末帧不足 7B 已由 RX 线程 '\0' 填充, 故遇 '\0' 即终止拼接. */
+	size_t out = 0;
+	bool truncated = false;
+	for (uint8_t i = 0; i < total && out + 1 < buf_len && !truncated; i++) {
+		bool got;
+		char chunk[7];
+		EnterCriticalSection(&mgr->cs);
+		got = mgr->ver_got[i];
+		memcpy(chunk, mgr->ver_text[i], 7);
+		LeaveCriticalSection(&mgr->cs);
+		if (!got) break;  /* 帧缺失, 截断 */
+
+		for (int j = 0; j < 7; j++) {
+			if (chunk[j] == '\0') { truncated = true; break; }
+			buf[out++] = chunk[j];
+			if (out + 1 >= buf_len) break;
 		}
 	}
-	return false;
+	mgr->ver_query_active = false;
+	buf[out] = '\0';
+	return out > 0;
 }
 
 bool CanManager_Reboot(CanManager *mgr)

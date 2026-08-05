@@ -11,27 +11,26 @@
 
 /* UDP 配置命令格式: [cmd 1B][data...] (无魔数头, 走配置端口)
  * 与旧版不同: 不再有 0xAA 0x55 魔数头, 通道已分离 */
-#define GATEWAY_DATA_PORT_DEFAULT   9090  /* 数据端口默认 (可配, 固件持久化) */
-#define GATEWAY_CONFIG_PORT         8601  /* 配置端口 (固件固定, 不可改) */
+#define GATEWAY_DATA_PORT_DEFAULT   9600  /* 数据端口默认 (nRF24↔上位机透传) */
+#define GATEWAY_CONFIG_PORT         8600  /* 配置端口 (固件固定, 不可改) */
 
-/* UDP 命令码 (命令帧首字节, 走配置端口 8601).
+/* UDP 命令码 (命令帧首字节, 走配置端口 8600).
  * 0x01-0x05: udp_fw_upgrade 库内命令 (FW_START/DATA/END/GET_VERSION/REBOOT)
- * 0x12+:     应用业务命令 (分网络/RF24/HOST 三组, 各含 set/get).
- *            掩码固定 255.255.255.0, 网关 = IP 末段改 1, 均不在帧中传输. */
+ * 0x10+:     应用业务命令 (网络/RF24/HOST/DISCOVER). 业务命令 ID 自 0x10 起重新编号.
+ *            多字节整数均为大端序 (BE). 掩码固定 255.255.255.0, 网关 = IP 末段改 1,
+ *            均不在帧中传输 (固件自算). */
 enum udp_cmd {
 	UDP_CMD_FW_START    = 0x01,
 	UDP_CMD_FW_DATA     = 0x02,
 	UDP_CMD_FW_END      = 0x03,
 	UDP_CMD_GET_VERSION = 0x04,
 	UDP_CMD_REBOOT      = 0x05,
-	UDP_CMD_SET_NET     = 0x12,  /* [mac 6B][ip 4B][port 2B BE] = 12B → 回显同序 12B (MAC 守卫) */
-	UDP_CMD_GET_NET     = 0x13,  /* (空) → [mac 6B][ip 4B][port 2B BE] = 12B (含本机 MAC) */
-	UDP_CMD_SET_RF24    = 0x14,  /* [ch 1B][addr 5B] = 6B → 回显同序 6B */
-	UDP_CMD_GET_RF24    = 0x15,  /* (空) → [ch 1B][addr 5B] = 6B */
-	UDP_CMD_SET_NET_MODE = 0x16, /* [mode 1B] (0=静态,1=DHCP) → 回显 1B (持久化, 重启生效) */
-	UDP_CMD_GET_NET_MODE = 0x17, /* (空) → [mode 1B] */
-	UDP_CMD_SET_HOST    = 0x18,  /* [host ip 4B][port 2B BE] = 6B → 回显同序 6B (持久化) */
-	UDP_CMD_GET_HOST    = 0x19,  /* (空) → [host ip 4B][port 2B BE] = 6B */
+	UDP_CMD_SET_IP      = 0x10,  /* [ip 4B BE] → [1B: 1=成功/0=失败] (持久化, 重启生效) */
+	UDP_CMD_GET_NET     = 0x11,  /* (空) → [data_port 2B][host_ip 4B][host_port 2B] = 8B */
+	UDP_CMD_SET_RF24    = 0x12,  /* [addr 5B] → [addr 5B] (信道固定 1, 不在帧中) */
+	UDP_CMD_GET_RF24    = 0x13,  /* (空) → [addr 5B] (信道固定 1, 不返回) */
+	UDP_CMD_SET_HOST    = 0x14,  /* [host_ip 4B][port 2B BE] = 6B → 同序回显 6B (持久化) */
+	UDP_CMD_DISCOVER    = 0x15,  /* (空) → [ip 4B][config_port 2B] = 6B (广播发现) */
 };
 
 /* 通道类型: 一个 UdpManager 实例对应一个通道 (单 socket).
@@ -42,18 +41,17 @@ typedef enum {
 	UDP_CHAN_DATA,     /* 数据通道: 数据帧收发, data_cb 上报, msg_cb 不用 */
 } UdpChannel;
 
-/* 无线接收器配置 (GET_NET + GET_RF24 + GET_HOST 三组响应合并后的结果).
- *   GET_NET  (0x13): [mac 6B][ip 4B][port 2B BE] = 12B → mac/ip/data_port
- *   GET_RF24 (0x15): [ch 1B][addr 5B] = 6B → rf24_channel/rf24_addr
- *   GET_HOST (0x19): [host ip 4B][port 2B BE] = 6B → host_ip/host_port
+/* 无线接收器配置 (DISCOVER + GET_NET + GET_RF24 响应合并后的结果).
+ *   DISCOVER (0x15): [ip 4B][config_port 2B] = 6B → ip/config_port
+ *   GET_NET  (0x11): [data_port 2B][host_ip 4B][host_port 2B] = 8B → data_port/host_ip/host_port
+ *   GET_RF24 (0x13): [addr 5B] = 5B → rf24_addr (信道固定 1, 不返回)
  * 掩码固定 255.255.255.0; 网关 = IP 末段改 1 (上位机不传, 固件自算).
- * config_port 恒为 8601 (硬编码). */
+ * config_port 恒为 8600 (硬编码); GET_NET 不返回 config_port, 需用 DISCOVER 获取. */
 typedef struct {
-	uint8_t mac[6];             /* 设备 MAC (GET_NET 回复带, 供 SET_NET 广播守卫) */
-	uint8_t rf24_channel;
-	uint8_t rf24_addr[5];
-	uint16_t data_port;         /* 固件数据端口 (固件 bind) */
-	char ip[16];                /* 固件 IP (点分十进制) */
+	uint8_t rf24_addr[5];       /* nRF24 地址 (信道固定 1, 不在结构内) */
+	uint16_t data_port;         /* 固件数据端口 (nRF24↔上位机透传 bind) */
+	uint16_t config_port;       /* 固件配置端口 (DISCOVER 返回, 恒 8600) */
+	char ip[16];                /* 固件 IP (DISCOVER 返回, 点分十进制) */
 	char host_ip[16];           /* 上位机目标 IP (固件 nRF24 数据转发目标) */
 	uint16_t host_port;         /* 上位机目标端口 (固件 nRF24 数据转发目标) */
 } GatewayConfig;
@@ -71,6 +69,7 @@ void UdpManager_Destroy(UdpManager *mgr);
 
 /* 连接/断开: 创建 socket 绑定本机 0.0.0.0:local_port, 设广播 + REUSEADDR.
  * chan 决定本实例是配置还是数据通道 (仅影响 RX 分发逻辑).
+ * local_port=0 → OS 自动分配临时端口 (配置通道推荐: 固件回复到发送方源端口, bind 哪个都行).
  * 远程目标 = remote_ip:remote_port: remote_ip 为 NULL/空/0.0.0.0/非法 → 广播自动发现,
  * 否则单播到该 IP. (收到对端包后 RX 线程会自动学习并更新 remote_addr) */
 bool UdpManager_Bind(UdpManager *mgr, UdpChannel chan,
@@ -85,24 +84,29 @@ bool UdpManager_IsBound(UdpManager *mgr);
 bool UdpManager_SendData(UdpManager *mgr, const uint8_t *data, size_t len);
 bool UdpManager_SendCommand(UdpManager *mgr, uint8_t cmd, const uint8_t *data, uint8_t len);
 
-/* 无线接收器配置 — 分网络/RF24/HOST 三组, 各含 set/get (走配置实例).
+/* 无线接收器配置 — 网络/RF24/HOST 三组, 各含 set/get (走配置实例).
  * 掩码固定 255.255.255.0, 网关 = IP 末段改 1, 固件自算, 上位机不传.
- * SET_NET 帧首 6B 为目标设备 MAC (固件校验: 单播/广播均须匹配才执行),
- * 故调用前应先 GetNet 拿到设备 MAC. */
-bool UdpManager_SetNet(UdpManager *mgr, const uint8_t *mac, const char *ip, uint16_t port);
-bool UdpManager_GetNet(UdpManager *mgr, uint8_t *mac, char *ip, size_t ip_len, uint16_t *port);
-bool UdpManager_SetRF24(UdpManager *mgr, uint8_t ch, const uint8_t *addr);
-bool UdpManager_GetRF24(UdpManager *mgr, uint8_t *ch, uint8_t *addr);
-
-/* 网络模式 (静态/DHCP) 切换 (走配置实例). mode: 0=静态, 1=DHCP.
- * 持久化, 重启生效. SetNetMode 发后建议配合 Reboot. */
-bool UdpManager_SetNetMode(UdpManager *mgr, uint8_t mode);
-bool UdpManager_GetNetMode(UdpManager *mgr, uint8_t *mode);
+ * 多字节整数均为大端序 (BE). */
+/* SET_IP (0x10): [ip 4B] → [1B: 1=成功/0=失败]. 持久化, 重启生效.
+ * 失败原因: IP 非法 (0.0.0.0/环回/组播/广播/保留段) 或设备处于 DHCP 模式.
+ * out_ok 可为 NULL; 返回 true 仅表示收到回复. */
+bool UdpManager_SetIp(UdpManager *mgr, const char *ip, bool *out_ok);
+/* GET_NET (0x11): (空) → [data_port 2B][host_ip 4B][host_port 2B] = 8B.
+ * host_ip 为点分十进制输出缓冲 (容量 host_ip_len ≥ 16); 三组出参均可空. */
+bool UdpManager_GetNet(UdpManager *mgr, uint16_t *data_port,
+		       char *host_ip, size_t host_ip_len, uint16_t *host_port);
+/* SET_RF24 / GET_RF24 (0x12/0x13): 仅 5B 地址 (信道固定 1, 不在帧中). */
+bool UdpManager_SetRF24(UdpManager *mgr, const uint8_t *addr);
+bool UdpManager_GetRF24(UdpManager *mgr, uint8_t *addr);
 
 /* 上位机目标 (HOST) 配置 (走配置实例): 固件把 nRF24 数据固定单播到
- * host_ip:host_port (默认 192.168.11.100:8602, 持久化). */
+ * host_ip:host_port (默认 192.168.11.150:9602, 持久化). 仅 set; 查询改用 GetNet. */
 bool UdpManager_SetHost(UdpManager *mgr, const char *ip, uint16_t port);
-bool UdpManager_GetHost(UdpManager *mgr, char *ip, size_t ip_len, uint16_t *port);
+
+/* DISCOVER (0x15): 广播发现设备. (空) → [ip 4B][config_port 2B] = 6B.
+ * ip 为点分十进制输出缓冲 (容量 ip_len ≥ 16). config_port 出参可空.
+ * 用于 Tab4 设备查找: 广播 [0x15] 后设备回复本机 IP + 配置端口. */
+bool UdpManager_Discover(UdpManager *mgr, char *ip, size_t ip_len, uint16_t *config_port);
 
 /* 查询版本 (GET_VERSION): 同步等待, 填入 version 字符串 (NUL 终止).
  * buf_len 为 buf 容量. 返回 true 表示成功. */
@@ -113,7 +117,7 @@ bool UdpManager_Reboot(UdpManager *mgr);
 /* CRC16-CCITT (poly 0x1021, init 0x0000), 与固件 crc16_ccitt 对齐 */
 uint16_t UdpManager_CRC16_CCITT(const uint8_t *data, size_t len);
 
-/* 固件升级 (配置端口 8601, 0x01-0x03 由 udp_fw_upgrade 库处理):
+/* 固件升级 (配置端口 8600, 0x01-0x03 由 udp_fw_upgrade 库处理):
  *   Start: 发 [0x01][size 4B LE][可选 32B keyhash], 固件回 [0x01][resp], 成功返回 true
  *     resp: 0=失败, 1=成功, 2=keyhash 不一致被拒绝
  *   Data:  发 [0x02][data ≤511B], 固件回 [0x02][offset 4B LE], 校验 offset==*got_offset

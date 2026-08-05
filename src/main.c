@@ -1,9 +1,9 @@
 /*
- * 手柄-接收器工具 - Win32 GUI 应用
- * Tab1: 手柄绑定 (手柄CAN扫描/连接 + 接收器UDP单播连接 + NRF读取比对 + 绑定)
- * Tab2: 手柄升级 (CAN)
- * Tab3: 手柄接收端配置 (UDP, 含固件升级 + 网络参数设置)
- * Tab4: 设备查找 (广播发现接收器真实 IP)
+ * 手柄-接收机工具 - Win32 GUI 应用
+ * Tab0: 接收机配置 (UDP: 接收机IP/配置端口 + 上行IP/上行端口/数据端口)
+ * Tab1: 手柄绑定 (手柄CAN扫描/连接 + 接收机UDP单播连接 + NRF读取比对 + 绑定)
+ * Tab2: 固件升级 (CAN手柄升级 + UDP接收机升级)
+ * Tab3: 设备查找 (DISCOVER 广播发现接收机真实 IP)
  */
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -39,9 +39,8 @@
 #define IDC_CAN_DEVICE           1001   /* 手柄: 设备下拉 (CBS_DROPDOWNLIST) */
 #define IDC_CAN_REFRESH          1002   /* 手柄: 刷新按钮 */
 #define IDC_CAN_CONNECT          1003   /* 手柄: 连接/断开 按钮 */
-#define IDC_UDP_IP               1004   /* 接收器: 目标 IP (CBS_DROPDOWN) */
-#define IDC_UDP_CONNECT          1005   /* 接收器: 连接/断开 按钮 */
-#define IDC_UDP_LOCAL_PORT       1010   /* 接收器: 本地端口 (bind, 默认 8602) */
+#define IDC_UDP_IP               1004   /* 接收机: 接收机 IP 输入框 */
+#define IDC_UDP_CONNECT          1005   /* 接收机: 连接/断开 按钮 */
 #define IDC_BTN_CHECK_BIND       1006   /* 检测绑定状态 */
 #define IDC_BTN_BIND             1007   /* 绑定设备 */
 /* Tab2 手柄固件升级 */
@@ -50,22 +49,22 @@
 #define IDC_HFW_UPGRADE          1103
 #define IDC_HFW_VERSION          1104   /* 固件版本静态文本 */
 #define IDC_HFW_GETVER           1105   /* 获取版本按钮 */
-/* Tab3 接收器固件升级 */
+/* Tab3 接收机固件升级 */
 #define IDC_TFW_FILE             1201
 #define IDC_TFW_BROWSE           1202
 #define IDC_TFW_UPGRADE          1203
 #define IDC_TFW_VERSION          1204   /* 固件版本静态文本 */
 #define IDC_TFW_GETVER           1205   /* 获取版本按钮 */
-/* Tab3 网络参数设置 (SET_NET 0x12 / GET_NET 0x13) */
-#define IDC_NET_IP               1210   /* 设置用 IP 输入框 */
-#define IDC_NET_PORT             1211   /* 设置用 数据端口 输入框 */
-#define IDC_NET_APPLY            1212   /* 设置按钮 */
-#define IDC_NET_QUERY            1213   /* 查询按钮 */
-/* Tab3 目标主机 (SET_HOST 0x18 / GET_HOST 0x19): 固件 nRF24 数据转发目标 */
-#define IDC_HOST_IP              1220   /* 上位机 IP 输入框 */
-#define IDC_HOST_PORT            1221   /* 上位机端口 输入框 */
-#define IDC_HOST_APPLY           1222   /* 目标主机 设置按钮 */
-#define IDC_HOST_QUERY           1223   /* 目标主机 查询按钮 */
+/* Tab0 接收机配置. 行1: 接收机IP(可配)+配置端口(只读); 行2: 上行IP+上行端口+数据端口(只读). */
+#define IDC_CFG_IP               1500   /* 行1 接收机IP 输入框 (SET_IP / DISCOVER) */
+#define IDC_CFG_CFGPORT          1501   /* 行1 配置端口 (只读回填, DISCOVER 返回) */
+#define IDC_CFG_APPLY            1502   /* 行1 配置按钮 (SET_IP) */
+#define IDC_CFG_QUERY            1503   /* 行1 查询按钮 (DISCOVER) */
+#define IDC_CFG_UPIP             1504   /* 行2 上行IP 输入框 (host_ip, SET_HOST) */
+#define IDC_CFG_UPPORT           1505   /* 行2 上行数据监听端口 输入框 (host_port) */
+#define IDC_CFG_DATAPORT         1506   /* 行2 接收机数据监听端口 (只读, data_port) */
+#define IDC_CFG_UPAPPLY          1507   /* 行2 配置按钮 (SET_HOST) */
+#define IDC_CFG_UPQUERY          1508   /* 行2 查询按钮 (GET_NET) */
 /* Tab4 设备查找 */
 #define IDC_DISC_START           1301   /* 开始/停止查找 按钮 */
 #define IDC_DISC_LIST            1302   /* 发现的 IP 列表 (LISTBOX) */
@@ -86,31 +85,25 @@ static HWND g_hTabDlg[4];
 static CanManager *g_canTab[CAN_TAB_COUNT];
 static int g_canTabChannel[CAN_TAB_COUNT];   /* 各 tab 已连接的 channel, -1=未连接 */
 
-/* 接收器 UDP 管理器: Tab1(绑定) 和 Tab3(配置) 各用独立实例, 互不耦合.
+/* 接收机 UDP 管理器: Tab1(绑定) 和 Tab3(配置) 各用独立实例, 互不耦合.
  * g_udpTabIdx 0=Tab1, 1=Tab3. */
-#define UDP_TAB_BIND  0   /* Tab1 手柄绑定页的接收器 */
-#define UDP_TAB_CFG   1   /* Tab3 接收端配置页的接收器 */
+#define UDP_TAB_BIND  0   /* Tab1 手柄绑定页的接收机 */
+#define UDP_TAB_CFG   1   /* Tab3 接收端配置页的接收机 */
 #define UDP_TAB_COUNT 2
 static UdpManager *g_cfgUdp[UDP_TAB_COUNT];
 static int g_udpConnected[UDP_TAB_COUNT];
 static BOOL g_udpBroadcast[UDP_TAB_COUNT];  /* 目标 IP = 255.255.255.255 有限广播 */
 
-/* Tab4 设备查找: 原生 winsock 广播 GET_NET (0x13), 收集 2s 内响应源 IP.
- * 用独立 socket (本地端口 8602), 不走 UdpManager. g_discRunning=查找中. */
+/* Tab4 设备查找: 原生 winsock 广播 DISCOVER (0x15), 解析回复 [ip][config_port].
+ * 用独立 socket (绑 8601 = CONFIG_PORT+1, 固件跨子网回复端口), 不走 UdpManager. g_discRunning=查找中. */
 static volatile BOOL g_discRunning;
 
-/* 手柄 NRF (CAN 0x111 响应填入) */
-static uint8_t g_handlerCh;
+/* 手柄 NRF 地址 (CAN 0x111 响应填入; 信道固定 1, 不再读取) */
 static uint8_t g_handlerAddr[5];
 static volatile BOOL g_handlerAddrGot;
 
-/* 接收器 NRF (UDP GET_RF24) */
-static uint8_t g_receiverCh;
+/* 接收机 NRF 地址 (UDP GET_RF24; 信道固定 1, 不再读取) */
 static uint8_t g_receiverAddr[5];
-
-/* 接收器设备 MAC (GET_NET 学习, SET_NET 守卫用) */
-static uint8_t g_devMac[6];
-static BOOL g_macValid;
 
 static char g_handlerFwPath[MAX_PATH];
 static char g_receiverFwPath[MAX_PATH];
@@ -194,10 +187,10 @@ static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     BOOL showVer = (version_id > 0 && getver_id > 0);
     BOOL showFw = (fw_file_id > 0 && fw_browse_id > 0 && fw_upgrade_id > 0);
-    /* groupbox 高度: 基础(连接行)70 + 版本行26 + 固件区86 */
+    /* groupbox 高度: 基础(连接行)70 + 版本行26 + 固件区34(单行) */
     int boxH = 70;
     if (showVer) boxH += 26;
-    if (showFw) boxH += 86;
+    if (showFw) boxH += 34;
     CreateWindowExW(0, L"BUTTON", L"手柄",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, yPos, 436, boxH, hDlg, NULL, g_hInst, NULL);
@@ -227,23 +220,24 @@ static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
         SendMessageW(hVer, WM_SETFONT, (WPARAM)hFont, TRUE);
         HWND hGetVer = CreateWindowExW(0, L"BUTTON", L"获取版本",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                296, yPos + 54, 140, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
+                366, yPos + 54, 70, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
         SendMessageW(hGetVer, WM_SETFONT, (WPARAM)hFont, TRUE);
     }
-    /* 固件区 (可选, 内嵌 groupbox): 文件路径 + 浏览 + 升级. 紧跟版本行下方 */
+    /* 固件区 (可选, 内嵌 groupbox): 文件路径 + 浏览 + 升级, 单行布局.
+     * 浏览和升级并排在右侧并右对齐 (升级右边贴 groupbox 右内边距, 与连接按钮同右边界 436). */
     if (showFw) {
         int fy = yPos + (showVer ? 88 : 56);  /* 无版本行时上移 */
         HWND hFLbl = CreateWindowExW(0, L"STATIC", L"固件文件:",
                 WS_CHILD | WS_VISIBLE, 20, fy + 4, 60, 16, hDlg, NULL, g_hInst, NULL);
         HWND hFile = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                80, fy + 2, 260, 22, hDlg, (HMENU)(INT_PTR)fw_file_id, g_hInst, NULL);
+                80, fy + 2, 236, 22, hDlg, (HMENU)(INT_PTR)fw_file_id, g_hInst, NULL);
         HWND hBrowse = CreateWindowExW(0, L"BUTTON", L"浏览...",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                350, fy + 2, 60, 22, hDlg, (HMENU)(INT_PTR)fw_browse_id, g_hInst, NULL);
+                320, fy + 2, 56, 22, hDlg, (HMENU)(INT_PTR)fw_browse_id, g_hInst, NULL);
         HWND hUpg = CreateWindowExW(0, L"BUTTON", L"升级",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                180, fy + 40, 80, 28, hDlg, (HMENU)(INT_PTR)fw_upgrade_id, g_hInst, NULL);
+                380, fy + 2, 56, 22, hDlg, (HMENU)(INT_PTR)fw_upgrade_id, g_hInst, NULL);
         SendMessageW(hFLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessageW(hFile,  WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessageW(hBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -255,7 +249,7 @@ static int CreateCanGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
     return boxH + 8;  /* groupbox 高 + 8 间距 */
 }
 
-/* 创建接收器 UDP 连接 groupbox (目标 IP + 连接, 配置端口固定 8601).
+/* 创建接收机 UDP 连接 groupbox (接收机 IP + 连接, 配置端口固定 8600).
  * version_id/getver_id < 0 时不显示版本行; fw_*_id > 0 时在版本行下方显示固件区 (内嵌).
  * 返回 groupbox 占用的总高度. */
 static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
@@ -266,25 +260,19 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
     BOOL showFw = (fw_file_id > 0 && fw_browse_id > 0 && fw_upgrade_id > 0);
     int boxH = 70;
     if (showVer) boxH += 26;
-    if (showFw) boxH += 86;
-    CreateWindowExW(0, L"BUTTON", L"接收器",
+    if (showFw) boxH += 34;
+    CreateWindowExW(0, L"BUTTON", L"接收机",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, yPos, 436, boxH, hDlg, NULL, g_hInst, NULL);
-    HWND hLbl = CreateWindowExW(0, L"STATIC", L"目标IP:",
-            WS_CHILD | WS_VISIBLE, 20, yPos + 24, 44, 14, hDlg, NULL, g_hInst, NULL);
+    HWND hLbl = CreateWindowExW(0, L"STATIC", L"接收机IP:",
+            WS_CHILD | WS_VISIBLE, 20, yPos + 24, 56, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
     HWND hIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            66, yPos + 22, 89, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
+            78, yPos + 22, 110, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_IP, g_hInst, NULL);
     SendMessageW(hIp, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 本地端口 (bind). 固件监听 8601, 上位机本地端口收广播. 两 tab 默认都 8602 */
-    HWND hLpLbl = CreateWindowExW(0, L"STATIC", L"本地端口:",
-            WS_CHILD | WS_VISIBLE, 164, yPos + 24, 56, 14, hDlg, NULL, g_hInst, NULL);
-    SendMessageW(hLpLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hLocalPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"8602",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            224, yPos + 22, 44, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_LOCAL_PORT, g_hInst, NULL);
-    SendMessageW(hLocalPort, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 本地端口由 OS 自动分配 (配置通道 bind 临时端口; 固件回复到发送方源端口, 无需固定).
+     * 连接按钮 x=366 与 CAN 连接按钮 (及 Tab3 下方查询按钮) 垂直对齐. */
     HWND hUdpConn = CreateWindowExW(0, L"BUTTON", L"连接",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             366, yPos + 22, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_UDP_CONNECT, g_hInst, NULL);
@@ -300,23 +288,24 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
         SendMessageW(hVer, WM_SETFONT, (WPARAM)hFont, TRUE);
         HWND hGetVer = CreateWindowExW(0, L"BUTTON", L"获取版本",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                296, yPos + 54, 140, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
+                366, yPos + 54, 70, 22, hDlg, (HMENU)(INT_PTR)getver_id, g_hInst, NULL);
         SendMessageW(hGetVer, WM_SETFONT, (WPARAM)hFont, TRUE);
     }
-    /* 固件区 (可选, 内嵌 groupbox) */
+    /* 固件区 (可选, 内嵌 groupbox): 文件路径 + 浏览 + 升级, 单行布局.
+     * 浏览和升级并排在右侧并右对齐 (升级右边贴 groupbox 右内边距, 与连接按钮同右边界 436). */
     if (showFw) {
         int fy = yPos + (showVer ? 88 : 56);
         HWND hFLbl = CreateWindowExW(0, L"STATIC", L"固件文件:",
                 WS_CHILD | WS_VISIBLE, 20, fy + 4, 60, 16, hDlg, NULL, g_hInst, NULL);
         HWND hFile = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                80, fy + 2, 260, 22, hDlg, (HMENU)(INT_PTR)fw_file_id, g_hInst, NULL);
+                80, fy + 2, 236, 22, hDlg, (HMENU)(INT_PTR)fw_file_id, g_hInst, NULL);
         HWND hBrowse = CreateWindowExW(0, L"BUTTON", L"浏览...",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                350, fy + 2, 60, 22, hDlg, (HMENU)(INT_PTR)fw_browse_id, g_hInst, NULL);
+                320, fy + 2, 56, 22, hDlg, (HMENU)(INT_PTR)fw_browse_id, g_hInst, NULL);
         HWND hUpg = CreateWindowExW(0, L"BUTTON", L"升级",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                180, fy + 40, 80, 28, hDlg, (HMENU)(INT_PTR)fw_upgrade_id, g_hInst, NULL);
+                380, fy + 2, 56, 22, hDlg, (HMENU)(INT_PTR)fw_upgrade_id, g_hInst, NULL);
         SendMessageW(hFLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessageW(hFile,  WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessageW(hBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -326,12 +315,12 @@ static int CreateUdpGroupBox(HWND hDlg, int yPos, int version_id, int getver_id,
 }
 
 /* 同步指定 CAN tab 的连接状态到 UI (按钮文字/控件禁用).
- * canTabIdx: CAN_TAB_BIND(Tab1) 或 CAN_TAB_UPGRADE(Tab2), 各 tab 独立. */
+ * canTabIdx: CAN_TAB_BIND(Tab1 手柄绑定) 或 CAN_TAB_UPGRADE(Tab2 固件升级), 各 tab 独立. */
 static void SyncCanConnState(int canTabIdx)
 {
     int connected = (g_canTabChannel[canTabIdx] >= 0);
-    /* CAN tab 索引 → 子对话框索引: BIND→Tab1(0), UPGRADE→Tab2(1) */
-    HWND h = g_hTabDlg[canTabIdx];
+    /* CAN tab 索引 → 子对话框索引: BIND→Tab1(g_hTabDlg[1]), UPGRADE→Tab2(g_hTabDlg[2]) */
+    HWND h = (canTabIdx == CAN_TAB_BIND) ? g_hTabDlg[1] : g_hTabDlg[2];
     if (!h) return;
     SetWindowTextW(GetDlgItem(h, IDC_CAN_CONNECT), connected ? L"断开" : L"连接");
     EnableWindow(GetDlgItem(h, IDC_CAN_DEVICE),  connected ? FALSE : TRUE);
@@ -344,32 +333,38 @@ static void SyncCanConnState(int canTabIdx)
     }
 }
 
-/* 同步 UDP 连接状态到所有含 UDP groupbox 的 tab (Tab1/Tab3). */
-/* tabIdx: 0=Tab1(绑定), 1=Tab3(配置). 只更新对应 tab 的连接 UI. */
+/* 同步 UDP 连接状态到含 UDP groupbox 的 tab.
+ * udpTabIdx: UDP_TAB_BIND(Tab1 手柄绑定) 或 UDP_TAB_CFG(Tab0 接收机配置 + Tab2 固件升级).
+ * UDP_TAB_CFG 跨 Tab0/Tab2 两个对话框 (同一接收机实例), 需都更新. */
 static void SyncUdpConnState(int udpTabIdx)
 {
     int connected = g_udpConnected[udpTabIdx];
     const wchar_t *text = connected ? L"断开" : L"连接";
     BOOL enable = connected ? FALSE : TRUE;
-    /* Tab1(对话框 g_hTabDlg[0]) 对应 udpTabIdx=0; Tab3(g_hTabDlg[2]) 对应 udpTabIdx=1 */
-    HWND h = (udpTabIdx == UDP_TAB_BIND) ? g_hTabDlg[0] : g_hTabDlg[2];
-    if (h) {
+    BOOL bcast = g_udpBroadcast[udpTabIdx];
+
+    /* 更新连接按钮 + IP 框. BIND→Tab1; CFG→Tab0 和 Tab2. */
+    HWND tabs[2];
+    int ntab = 0;
+    if (udpTabIdx == UDP_TAB_BIND) {
+        tabs[ntab++] = g_hTabDlg[1];
+    } else {
+        tabs[ntab++] = g_hTabDlg[0];  /* Tab0 接收机配置 */
+        tabs[ntab++] = g_hTabDlg[2];  /* Tab2 固件升级 */
+    }
+    for (int i = 0; i < ntab; i++) {
+        HWND h = tabs[i];
+        if (!h) continue;
         SetWindowTextW(GetDlgItem(h, IDC_UDP_CONNECT), text);
         EnableWindow(GetDlgItem(h, IDC_UDP_IP), enable);
-        EnableWindow(GetDlgItem(h, IDC_UDP_LOCAL_PORT), enable);
     }
-    /* Tab3 升级/获取版本/目标主机按钮启用条件.
-     * 广播模式 (255.255.255.255) 下 GET_VERSION/升级/目标主机 仅对单台有意义, 禁用;
-     * GET_NET/SET_NET 不受影响 (广播发现 + MAC 守卫本就是广播用法).
-     * 目标主机按钮保持原默认行为 (始终可用), 仅广播连接时禁用, 断开即恢复. */
+
+    /* Tab2 (固件升级) 接收机升级/获取版本按钮: 广播模式下禁用 (单台才有意义). */
     if (udpTabIdx == UDP_TAB_CFG && g_hTabDlg[2]) {
-        BOOL bcast = g_udpBroadcast[udpTabIdx];
         EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_UPGRADE),
                      connected && !bcast && strlen(g_receiverFwPath) > 0 ? TRUE : FALSE);
         EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_TFW_GETVER),
                      connected && !bcast ? TRUE : FALSE);
-        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_HOST_APPLY), bcast ? FALSE : TRUE);
-        EnableWindow(GetDlgItem(g_hTabDlg[2], IDC_HOST_QUERY), bcast ? FALSE : TRUE);
     }
 }
 
@@ -395,82 +390,108 @@ static void CreateBindTabControls(HWND hDlg)
     }
 }
 
-static void CreateHandlerFwTabControls(HWND hDlg)
-{
-    /* Tab2: 一个 CAN groupbox 包含 连接+版本+固件区 */
-    CreateCanGroupBox(hDlg, 6, IDC_HFW_VERSION, IDC_HFW_GETVER,
-                      IDC_HFW_FILE, IDC_HFW_BROWSE, IDC_HFW_UPGRADE);
-}
-
-static void CreateTransmitterFwTabControls(HWND hDlg)
+/* 创建 Tab0 接收机配置控件: 连接 groupbox + 接收机参数 groupbox(包接收机配置/上行参数).
+ * 接收机配置 (接收机IP/配置端口) 和 上行参数 (上行IP/上行端口/数据端口) 各为子 groupbox,
+ * 共同被外层 "接收机参数" groupbox 包住 (连接 groupbox 标题已是"接收机", 外层改名避免重名). */
+static void CreateReceiverConfigTabControls(HWND hDlg)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    /* Tab3: 一个 UDP groupbox 包含 连接+版本+固件区, 下方独立网络参数区 */
     int y = 6;
-    y += CreateUdpGroupBox(hDlg, y, IDC_TFW_VERSION, IDC_TFW_GETVER,
-                           IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE);  /* y=6→196 */
+    /* 连接 groupbox (接收机IP + 连接按钮). 版本/固件区不显示 (本 tab 只做配置). */
+    y += CreateUdpGroupBox(hDlg, y, -1, -1, -1, -1, -1);
 
-    /* 网络参数 groupbox: 设置接收器 IP + 数据端口 (SET_NET 0x12).
-     * 掩码固定 255.255.255.0, 网关=IP 末段改 1, 固件自算, 不传.
-     * (设备 MAC 由 GET_NET 内部学习供 SET_NET 守卫, 不在 UI 显示) */
-    int ny = y;  /* 紧接 UDP groupbox 下方 */
-    CreateWindowExW(0, L"BUTTON", L"网络参数",
+    /* 外层 "接收机参数" groupbox: 包住下方 "接收机配置" + "上行参数" 两个子 groupbox.
+     * (连接 groupbox 标题已是"接收机", 外层改名避免重名; 只影响 Tab0)
+     * 高度 = 标题区 18 + 子groupbox1(60) + 间距 4 + 子groupbox2(90) + 底边 10 = 182 */
+    int oy = y;
+    int outerH = 18 + 60 + 4 + 90 + 10;
+    CreateWindowExW(0, L"BUTTON", L"接收机参数",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, ny, 436, 70, hDlg, NULL, g_hInst, NULL);
-    HWND hLbl = CreateWindowExW(0, L"STATIC", L"IP:",
-            WS_CHILD | WS_VISIBLE, 20, ny + 26, 24, 14, hDlg, NULL, g_hInst, NULL);
+            10, oy, 436, outerH, hDlg, NULL, g_hInst, NULL);
+
+    /* 子 groupbox 1 "接收机配置": 接收机IP(可配) + 配置端口(只读) + 配置/查询.
+     * 嵌入外层 groupbox 内, 左右各留 10 内边距. */
+    int g1y = oy + 18;
+    CreateWindowExW(0, L"BUTTON", L"接收机配置",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            20, g1y, 416, 60, hDlg, NULL, g_hInst, NULL);
+    HWND hLbl = CreateWindowExW(0, L"STATIC", L"接收机IP:",
+            WS_CHILD | WS_VISIBLE, 30, g1y + 26, 56, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hNetIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+    HWND hCfgIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            46, ny + 24, 110, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_IP, g_hInst, NULL);
-    SendMessageW(hNetIp, WM_SETFONT, (WPARAM)hFont, TRUE);
+            88, g1y + 24, 110, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_IP, g_hInst, NULL);
+    SendMessageW(hCfgIp, WM_SETFONT, (WPARAM)hFont, TRUE);
+    hLbl = CreateWindowExW(0, L"STATIC", L"配置端口:",
+            WS_CHILD | WS_VISIBLE, 206, g1y + 26, 56, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hCfgPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+            264, g1y + 24, 56, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_CFGPORT, g_hInst, NULL);
+    SendMessageW(hCfgPort, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hCfgApply = CreateWindowExW(0, L"BUTTON", L"配置",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            330, g1y + 24, 50, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_APPLY, g_hInst, NULL);
+    SendMessageW(hCfgApply, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hCfgQuery = CreateWindowExW(0, L"BUTTON", L"查询",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            386, g1y + 24, 44, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_QUERY, g_hInst, NULL);
+    SendMessageW(hCfgQuery, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    /* 子 groupbox 2 "上行参数": 两行布局.
+     * 行1: 上行IP (host_ip) + 上行端口 (host_port)
+     * 行2: 数据端口 (data_port, 只读) + 配置/查询按钮 */
+    int g2y = g1y + 60 + 4;
+    CreateWindowExW(0, L"BUTTON", L"上行参数",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            20, g2y, 416, 90, hDlg, NULL, g_hInst, NULL);
+    /* 行1: 上行IP + 上行端口 */
+    hLbl = CreateWindowExW(0, L"STATIC", L"上行IP:",
+            WS_CHILD | WS_VISIBLE, 30, g2y + 26, 44, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hUpIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            74, g2y + 24, 120, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_UPIP, g_hInst, NULL);
+    SendMessageW(hUpIp, WM_SETFONT, (WPARAM)hFont, TRUE);
+    hLbl = CreateWindowExW(0, L"STATIC", L"上行端口:",
+            WS_CHILD | WS_VISIBLE, 206, g2y + 26, 56, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hUpPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            264, g2y + 24, 56, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_UPPORT, g_hInst, NULL);
+    SendMessageW(hUpPort, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 行2: 数据端口 (只读) + 配置/查询按钮 (与 groupbox1 按钮同列) */
     hLbl = CreateWindowExW(0, L"STATIC", L"数据端口:",
-            WS_CHILD | WS_VISIBLE, 166, ny + 26, 64, 14, hDlg, NULL, g_hInst, NULL);
+            WS_CHILD | WS_VISIBLE, 30, g2y + 58, 56, 14, hDlg, NULL, g_hInst, NULL);
     SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hNetPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            234, ny + 24, 56, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_PORT, g_hInst, NULL);
-    SendMessageW(hNetPort, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hApply = CreateWindowExW(0, L"BUTTON", L"设置",
+    HWND hDataPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+            88, g2y + 56, 56, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_DATAPORT, g_hInst, NULL);
+    SendMessageW(hDataPort, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hUpApply = CreateWindowExW(0, L"BUTTON", L"配置",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            300, ny + 24, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_APPLY, g_hInst, NULL);
-    SendMessageW(hApply, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hQuery = CreateWindowExW(0, L"BUTTON", L"查询",
+            330, g2y + 56, 50, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_UPAPPLY, g_hInst, NULL);
+    SendMessageW(hUpApply, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hUpQuery = CreateWindowExW(0, L"BUTTON", L"查询",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            366, ny + 24, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_NET_QUERY, g_hInst, NULL);
-    SendMessageW(hQuery, WM_SETFONT, (WPARAM)hFont, TRUE);
-
-    /* 目标主机 groupbox: 固件 nRF24 数据转发目标 (SET_HOST 0x18 / GET_HOST 0x19).
-     * 上位机本地数据端口应 = host_port 才能收到转发数据. */
-    int hy = ny + 74;
-    CreateWindowExW(0, L"BUTTON", L"目标主机",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, hy, 436, 70, hDlg, NULL, g_hInst, NULL);
-    hLbl = CreateWindowExW(0, L"STATIC", L"上位机IP:",
-            WS_CHILD | WS_VISIBLE, 20, hy + 26, 50, 14, hDlg, NULL, g_hInst, NULL);
-    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hHostIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            72, hy + 24, 96, 22, hDlg, (HMENU)(INT_PTR)IDC_HOST_IP, g_hInst, NULL);
-    SendMessageW(hHostIp, WM_SETFONT, (WPARAM)hFont, TRUE);
-    hLbl = CreateWindowExW(0, L"STATIC", L"端口:",
-            WS_CHILD | WS_VISIBLE, 176, hy + 26, 30, 14, hDlg, NULL, g_hInst, NULL);
-    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hHostPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            208, hy + 24, 56, 22, hDlg, (HMENU)(INT_PTR)IDC_HOST_PORT, g_hInst, NULL);
-    SendMessageW(hHostPort, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hHostApply = CreateWindowExW(0, L"BUTTON", L"设置",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            300, hy + 24, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_HOST_APPLY, g_hInst, NULL);
-    SendMessageW(hHostApply, WM_SETFONT, (WPARAM)hFont, TRUE);
-    HWND hHostQuery = CreateWindowExW(0, L"BUTTON", L"查询",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            366, hy + 24, 70, 22, hDlg, (HMENU)(INT_PTR)IDC_HOST_QUERY, g_hInst, NULL);
-    SendMessageW(hHostQuery, WM_SETFONT, (WPARAM)hFont, TRUE);
+            386, g2y + 56, 44, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_UPQUERY, g_hInst, NULL);
+    SendMessageW(hUpQuery, WM_SETFONT, (WPARAM)hFont, TRUE);
+    (void)hCfgApply; (void)hCfgQuery; (void)hUpApply; (void)hUpQuery;
 }
 
-/* 创建 Tab4 设备查找控件: 开始/停止按钮 + IP 列表 + 复制按钮 */
+/* 创建 Tab2 固件升级控件: 上 CAN 手柄升级 + 下 UDP 接收机升级 */
+static void CreateFwUpgradeTabControls(HWND hDlg)
+{
+    int y = 6;
+    /* 上半: CAN groupbox (连接+版本+固件区), 手柄升级 */
+    y += CreateCanGroupBox(hDlg, y, IDC_HFW_VERSION, IDC_HFW_GETVER,
+                           IDC_HFW_FILE, IDC_HFW_BROWSE, IDC_HFW_UPGRADE);
+    /* 下半: UDP groupbox (连接+版本+固件区), 接收机升级 */
+    y += CreateUdpGroupBox(hDlg, y, IDC_TFW_VERSION, IDC_TFW_GETVER,
+                           IDC_TFW_FILE, IDC_TFW_BROWSE, IDC_TFW_UPGRADE);
+}
+
+/* 创建 Tab4 设备查找控件: 开始/停止按钮 + 设备列表 + 复制按钮 */
 static void CreateDiscoverTabControls(HWND hDlg)
 {
     HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
@@ -479,26 +500,29 @@ static void CreateDiscoverTabControls(HWND hDlg)
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             20, 20, 120, 28, hDlg, (HMENU)(INT_PTR)IDC_DISC_START, g_hInst, NULL);
     SendMessageW(hStart, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 复制选中 IP 按钮 */
+    /* 复制选中 IP 按钮 (从 "ip:port" 条目中取 IP) */
     HWND hCopy = CreateWindowExW(0, L"BUTTON", L"复制选中 IP",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             150, 20, 120, 28, hDlg, (HMENU)(INT_PTR)IDC_DISC_COPY, g_hInst, NULL);
     SendMessageW(hCopy, WM_SETFONT, (WPARAM)hFont, TRUE);
-    /* 发现的 IP 列表 (LISTBOX, 支持单选) */
+    /* 列表标题提示 */
+    HWND hLbl = CreateWindowExW(0, L"STATIC", L"发现的设备 (IP:配置端口)",
+            WS_CHILD | WS_VISIBLE, 20, 50, 200, 14, hDlg, NULL, g_hInst, NULL);
+    SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+    /* 发现的设备列表 (LISTBOX, 支持单选), 条目格式 "ip:config_port" */
     HWND hList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP,
-            20, 60, 300, 200, hDlg, (HMENU)(INT_PTR)IDC_DISC_LIST, g_hInst, NULL);
+            20, 68, 300, 192, hDlg, (HMENU)(INT_PTR)IDC_DISC_LIST, g_hInst, NULL);
     SendMessageW(hList, WM_SETFONT, (WPARAM)hFont, TRUE);
 }
 
-/* CAN 帧回调: 收到 0x111 RF24 配置响应时填 g_handlerAddr 并置标志 */
+/* CAN 帧回调: 收到 0x111 RF24 配置响应时填 g_handlerAddr 并置标志.
+ * 新格式 [cmd 1B][addr 5B][reserved 2B] (信道固定 1, 不返回). */
 static void can_frame_cb(const CanFrame *frame, void *user_data)
 {
     (void)user_data;
-    if (frame->id == CAN_ID_RF24_CONFIG_RESP && frame->dlc >= 7) {
-        /* [cmd 1B][channel 1B][addr 5B][reserved 1B] */
-        g_handlerCh = frame->data[1];
-        memcpy(g_handlerAddr, frame->data + 2, 5);
+    if (frame->id == CAN_ID_RF24_CONFIG_RESP && frame->dlc >= 6) {
+        memcpy(g_handlerAddr, frame->data + 1, 5);
         g_handlerAddrGot = TRUE;
     }
 }
@@ -517,7 +541,7 @@ static void udp_msg_cb(const char *msg, void *user_data)
 }
 
 /* 发 CAN 0x110 GET_CONFIG 并等待 0x111 响应 (轮询标志, 超时 800ms).
- * 成功返回 true, g_handlerCh/g_handlerAddr 已填. */
+ * 成功返回 true, g_handlerAddr 已填 (信道固定 1, 不再读取). */
 static BOOL ReadHandlerNrf(void)
 {
     g_handlerAddrGot = FALSE;
@@ -539,12 +563,12 @@ static void OnGetVersionCan(HWND hChildDlg);
 static void OnGetVersionUdp(HWND hChildDlg);
 
 /* CAN 连接/断开 (各 tab 独立). hChildDlg 的 GWLP_USERDATA 给出 tab 索引.
- * Tab1(0)→CAN_TAB_BIND, Tab2(1)→CAN_TAB_UPGRADE. 失败友好提示占用原因. */
+ * 新布局: Tab1(手柄绑定)→CAN_TAB_BIND, Tab2(固件升级)→CAN_TAB_UPGRADE. 失败友好提示占用原因. */
 static void OnCanConnect(HWND hChildDlg)
 {
     int tabIdx = (int)GetWindowLongPtrW(hChildDlg, GWLP_USERDATA);
-    /* Tab1/Tab2 对应 CAN_TAB_BIND/CAN_TAB_UPGRADE (数值一致) */
-    int canTabIdx = (tabIdx == 0) ? CAN_TAB_BIND : CAN_TAB_UPGRADE;
+    /* Tab1→CAN_TAB_BIND, Tab2→CAN_TAB_UPGRADE */
+    int canTabIdx = (tabIdx == 1) ? CAN_TAB_BIND : CAN_TAB_UPGRADE;
 
     if (g_canTabChannel[canTabIdx] >= 0) {
         /* 断开 */
@@ -572,7 +596,7 @@ static void OnCanConnect(HWND hChildDlg)
     for (int other = 0; other < CAN_TAB_COUNT; other++) {
         if (other != canTabIdx && g_canTabChannel[other] == channel) {
             wchar_t wmsg[160];
-            const wchar_t *otherName = (other == CAN_TAB_BIND) ? L"手柄绑定页" : L"手柄升级页";
+            const wchar_t *otherName = (other == CAN_TAB_BIND) ? L"手柄绑定页" : L"固件升级页";
             swprintf(wmsg, 160,
                 L"设备 %hs 已被本工具 %s 占用\n请先在该页断开, 或选择其他设备", dev, otherName);
             MessageBoxW(g_hMain, wmsg, L"设备被占用", MB_OK | MB_ICONWARNING);
@@ -620,11 +644,12 @@ static void OnCanConnect(HWND hChildDlg)
     }
 }
 
-/* 接收器连接/断开 (从 IP 框取目标 IP, 配置端口固定 8601). 已连接则断开. */
+/* 接收机连接/断开 (从 IP 框取目标 IP, 配置端口固定 8600). 已连接则断开.
+ * Tab1(手柄绑定)→UDP_TAB_BIND; Tab0(配置)/Tab2(固件升级)→UDP_TAB_CFG (同一接收机实例). */
 static void OnUdpConnect(HWND hChildDlg)
 {
     int tabIdx = (int)GetWindowLongPtrW(hChildDlg, GWLP_USERDATA);
-    int udpTab = (tabIdx == 0) ? UDP_TAB_BIND : UDP_TAB_CFG;
+    int udpTab = (tabIdx == 1) ? UDP_TAB_BIND : UDP_TAB_CFG;
     UdpManager *mgr = g_cfgUdp[udpTab];
     if (g_udpConnected[udpTab]) {
         /* 断开 */
@@ -632,32 +657,28 @@ static void OnUdpConnect(HWND hChildDlg)
         g_udpConnected[udpTab] = 0;
         g_udpBroadcast[udpTab] = FALSE;
         SyncUdpConnState(udpTab);
-        /* Tab3 断开后 MAC 可能过期 (换设备重连), 清空避免误用 */
-        if (udpTab == UDP_TAB_CFG) {
-            g_macValid = FALSE;
-        }
         return;
     }
-    /* 取 IP 框内容. Tab1(绑定) 要求单播; Tab3(配置) 允许有限广播 255.255.255.255
-     * (广播 GET_NET 学 MAC + 广播 SET_NET 靠 MAC 守卫精准配置单台). 子网定向广播
-     * (x.x.x.255) 固件跨子网不可靠, 两 tab 均拒绝. */
+    /* 取 IP 框内容. Tab1(绑定) 要求单播; Tab0(配置)/Tab2(固件升级) 允许有限广播 255.255.255.255
+     * (同子网广播下 SET_IP/GET_NET/SET_HOST 仍可用; 跨子网仅 DISCOVER 有效).
+     * 子网定向广播 (x.x.x.255) 固件跨子网不可靠, 各 tab 均拒绝. */
     wchar_t wip[64] = { 0 };
     GetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_IP), wip, 64);
     char ip[64] = { 0 };
     WideCharToMultiByte(CP_ACP, 0, wip, -1, ip, sizeof(ip), NULL, NULL);
     if (!ip[0]) {
-        MessageBoxW(g_hMain, L"请填写接收器 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请填写接收机 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
     /* 有限广播 255.255.255.255: inet_addr 返回 INADDR_NONE (与错误同值), 用字符串识别 */
     BOOL is_limited_bcast = (strcmp(ip, "255.255.255.255") == 0);
     if (is_limited_bcast) {
         if (udpTab == UDP_TAB_BIND) {
-            MessageBoxW(g_hMain, L"绑定页只支持单播 IP\n广播请用「接收端配置」或「设备查找」页",
+            MessageBoxW(g_hMain, L"绑定页只支持单播 IP\n广播请用「接收机配置」或「设备查找」页",
                         L"提示", MB_OK | MB_ICONWARNING);
             return;
         }
-        /* Tab3 允许: 广播发现 + SET_NET MAC 守卫 */
+        /* Tab0(配置)/Tab2(固件升级) 允许: 同子网广播下可配置单台 */
     } else {
         unsigned long nip = inet_addr(ip);
         if (nip == INADDR_NONE || nip == INADDR_ANY) {
@@ -670,48 +691,48 @@ static void OnUdpConnect(HWND hChildDlg)
             return;
         }
     }
-    /* 读本地端口 (默认 8602). 远程固定 8601 (配置端口), 单播到指定 IP.
-     * Tab1 和 Tab3 独立实例, 默认端口同为 8602 (不会同时用, 用户每次只操作一个 tab). */
-    wchar_t wlp[16] = { 0 };
-    GetWindowTextW(GetDlgItem(hChildDlg, IDC_UDP_LOCAL_PORT), wlp, 16);
-    int local_port = _wtoi(wlp);
-    if (local_port <= 0 || local_port > 65535) local_port = 8602;
-    if (!UdpManager_Bind(mgr, UDP_CHAN_CONFIG, (uint16_t)local_port, ip, 8601)) {
+    /* 本地端口由 OS 自动分配 (传 0 给 Bind). 远程固定 8600 (配置端口), 单播到指定 IP.
+     * 固件回复到发送方源端口 (OS 临时端口), 配置通道无需固定本地端口. */
+    if (!UdpManager_Bind(mgr, UDP_CHAN_CONFIG, 0, ip, 8600)) {
         int err = WSAGetLastError();
         wchar_t wmsg[200];
         swprintf(wmsg, 200,
-            L"接收器连接失败\n本地端口 %d 可能被占用 (WSA 错误码: %d)\n请更换本地端口或关闭占用该端口的程序",
-            local_port, err);
+            L"接收机连接失败 (WSA 错误码: %d)\n请检查网络或设备 IP",
+            err);
         MessageBoxW(g_hMain, wmsg, L"连接失败", MB_OK | MB_ICONERROR);
         return;
     }
     UdpManager_StartRxThread(mgr);
     /* Tab1 先验证设备响应 (GET_RF24), 失败则断开且不标记已连接 (不显示"已连接") */
     if (udpTab == UDP_TAB_BIND) {
-        uint8_t ch, addr[5];
-        if (!UdpManager_GetRF24(mgr, &ch, addr)) {
+        uint8_t addr[5];
+        if (!UdpManager_GetRF24(mgr, addr)) {
             MessageBoxW(g_hMain,
                 L"连接失败\n"
-                L"请确认 IP 正确且接收器已上电",
+                L"请确认 IP 正确且接收机已上电",
                 L"连接失败", MB_OK | MB_ICONERROR);
             UdpManager_Unbind(mgr);   /* 停 RX 线程 + 关 socket */
             return;
         }
     }
-    /* 验证通过 (Tab1) 或非 Tab1 (Tab3): 正式标记已连接 */
+    /* 验证通过 (Tab1 绑定) 或非绑定 tab: 正式标记已连接 */
     g_udpConnected[udpTab] = 1;
     g_udpBroadcast[udpTab] = is_limited_bcast;
     SyncUdpConnState(udpTab);
     if (udpTab == UDP_TAB_CFG && !is_limited_bcast && GetDlgItem(hChildDlg, IDC_TFW_VERSION)) {
-        /* Tab3 单播连接成功后自动读版本 (广播模式跳过: 多设备版本歧义) */
+        /* Tab2 (固件升级) 单播连接成功后自动读版本 (Tab0 无版本框会跳过; 广播模式跳过: 多设备歧义) */
         OnGetVersionUdp(hChildDlg);
     }
 }
 
-/* ===== Tab4 设备查找: 原生 winsock 广播 GET_NET 收集响应源 IP =====
- * 不走 UdpManager (其 data_cb 不带源 IP); 直接 socket 收发, 拿 recvfrom 的源地址 */
+/* ===== Tab4 设备查找: 原生 winsock 广播 DISCOVER 收集响应 =====
+ * 不走 UdpManager (其回调不带源 IP); 直接 socket 收发.
+ * 用 DISCOVER (0x15): 设备回复 [0x15][ip 4B][config_port 2B], 显示 ip:config_port.
+ *
+ * 收包端口必须绑 8601 (CONFIG_PORT+1): 固件跨子网时把 DISCOVER 回复定向广播到
+ * CONFIG_PORT+1=8601; 同子网时回复到发送方源端口 (我们即 8601). 故绑 8601 两种情况都能收到. */
 
-/* 设备查找线程: 广播 GET_NET, 收集 2s 内所有响应的源 IP, 去重后 PostMessage 到主线程 */
+/* 设备查找线程: 广播 DISCOVER, 收集 10s 内所有响应, 解析回复 ip+port 上报去重 */
 static DWORD WINAPI discover_thread(LPVOID param)
 {
     (void)param;
@@ -726,24 +747,24 @@ static DWORD WINAPI discover_thread(LPVOID param)
     struct sockaddr_in local;
     memset(&local, 0, sizeof(local));
     local.sin_family = AF_INET;
-    local.sin_port = htons(8602);   /* 本地端口 8602 */
+    local.sin_port = htons(8601);   /* 本地端口 8601 (固件跨子网回复端口 CONFIG_PORT+1) */
     local.sin_addr.s_addr = INADDR_ANY;
     if (bind(s, (struct sockaddr *)&local, sizeof(local)) < 0) {
         closesocket(s);
         return 0;
     }
 
-    /* 用有限广播 255.255.255.255 发 GET_NET (0x13), 确保跨子网到达设备
+    /* 用有限广播 255.255.255.255 发 DISCOVER (0x15), 确保跨子网到达设备
      * (设备 IP 可能被改到与本机不同子网, 子网定向广播 x.x.x.255 到不了). */
-    uint8_t pkt = UDP_CMD_GET_NET;   /* 0x13 */
+    uint8_t pkt = UDP_CMD_DISCOVER;   /* 0x15 */
     struct sockaddr_in dst;
     memset(&dst, 0, sizeof(dst));
     dst.sin_family = AF_INET;
-    dst.sin_port = htons(8601);
+    dst.sin_port = htons(8600);       /* 配置端口 8600 */
     dst.sin_addr.s_addr = INADDR_BROADCAST;   /* 255.255.255.255 */
     sendto(s, (const char *)&pkt, 1, 0, (struct sockaddr *)&dst, sizeof(dst));
 
-    /* 接收窗口 10s (只收不重发). 取响应源 IP 去重上报.
+    /* 接收窗口 10s (只收不重发). 解析回复 [0x15][ip 4B BE][config_port 2B BE].
      * 用户可随时点"停止查找"提前结束 (g_discRunning=FALSE). */
     time_t end = time(NULL) + 10;
     while (g_discRunning && time(NULL) < end) {
@@ -759,10 +780,14 @@ static DWORD WINAPI discover_thread(LPVOID param)
         uint8_t buf[64];
         int n = recvfrom(s, (char *)buf, sizeof(buf), 0, (struct sockaddr *)&src, &alen);
         if (n <= 0) continue;
-        /* 响应首字节应是 GET_NET (0x13); 宽松校验, 主要取源 IP */
-        char *ipstr = inet_ntoa(src.sin_addr);
-        if (ipstr) {
-            PostMessageA(g_hMain, WM_DISC_FOUND_IP, 0, (LPARAM)_strdup(ipstr));
+        /* 响应首字节应为 DISCOVER (0x15); 负载 [ip 4B BE][config_port 2B BE].
+         * 优先用负载里的 ip (设备本机 IP, 经路由回复时源 IP 不准).
+         * 显示格式 "ip:config_port". */
+        if (n >= 7 && buf[0] == UDP_CMD_DISCOVER) {
+            uint16_t cport = ((uint16_t)buf[5] << 8) | buf[6];
+            char entry[32];
+            sprintf(entry, "%u.%u.%u.%u:%u", buf[1], buf[2], buf[3], buf[4], cport);
+            PostMessageA(g_hMain, WM_DISC_FOUND_IP, 0, (LPARAM)_strdup(entry));
         }
     }
 
@@ -788,23 +813,26 @@ static void OnDiscoverStart(HWND hChildDlg)
     CreateThread(NULL, 0, discover_thread, NULL, 0, NULL);
 }
 
-/* 复制选中 IP 到剪贴板 */
+/* 复制选中条目的 IP (去掉 :config_port) 到剪贴板, 便于粘贴到 Tab3 接收机 IP 框 */
 static void OnDiscoverCopy(HWND hChildDlg)
 {
     HWND hList = GetDlgItem(hChildDlg, IDC_DISC_LIST);
     int sel = (int)SendMessageW(hList, LB_GETCURSEL, 0, 0);
     if (sel < 0) {
-        MessageBoxW(g_hMain, L"请先在列表中选择一个 IP", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请先在列表中选择一个设备", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
-    wchar_t wip[64] = { 0 };
-    SendMessageW(hList, LB_GETTEXT, sel, (LPARAM)wip);
+    wchar_t wentry[64] = { 0 };
+    SendMessageW(hList, LB_GETTEXT, sel, (LPARAM)wentry);
+    /* 列表项格式 "ip:port", 截掉 ':' 及之后内容, 只留 IP */
+    wchar_t *colon = wcschr(wentry, L':');
+    if (colon) *colon = L'\0';
     if (!OpenClipboard(g_hMain)) return;
     EmptyClipboard();
-    size_t len = wcslen(wip) + 1;
+    size_t len = wcslen(wentry) + 1;
     HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, len * sizeof(wchar_t));
     if (hg) {
-        memcpy(GlobalLock(hg), wip, len * sizeof(wchar_t));
+        memcpy(GlobalLock(hg), wentry, len * sizeof(wchar_t));
         GlobalUnlock(hg);
         SetClipboardData(CF_UNICODETEXT, hg);
     }
@@ -812,88 +840,79 @@ static void OnDiscoverCopy(HWND hChildDlg)
     /* 不弹框, 静默复制 (避免打扰). */
 }
 
-/* 设置接收器网络参数 (SET_NET 0x12): IP + 数据端口. 掩码固定, 网关固件自算.
- * SET_NET 帧首 6B 为目标设备 MAC (固件单播/广播均校验匹配才执行),
- * 故须先查询 (GET_NET) 拿到设备 MAC. */
-static void OnNetApply(HWND hChildDlg)
+/* ===== Tab0 接收机配置 业务函数 (走 UDP_TAB_CFG 实例) ===== */
+
+/* 行1 配置 (SET_IP 0x10): 设置接收机静态 IP. 掩码固定, 网关固件自算.
+ * SET_IP 仅发 4B IP, 解析 1B 成功/失败回复. */
+static void OnCfgApply(HWND hChildDlg)
 {
     if (!g_udpConnected[UDP_TAB_CFG]) {
-        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请先连接接收机", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
-    if (!g_macValid) {
-        MessageBoxW(g_hMain, L"请先点击\"查询\"获取设备 MAC, 再设置网络参数",
-                    L"缺少 MAC", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    wchar_t wip[64] = { 0 }, wport[16] = { 0 };
-    GetWindowTextW(GetDlgItem(hChildDlg, IDC_NET_IP), wip, 64);
-    GetWindowTextW(GetDlgItem(hChildDlg, IDC_NET_PORT), wport, 16);
+    wchar_t wip[64] = { 0 };
+    GetWindowTextW(GetDlgItem(hChildDlg, IDC_CFG_IP), wip, 64);
     char ip[64] = { 0 };
     WideCharToMultiByte(CP_ACP, 0, wip, -1, ip, sizeof(ip), NULL, NULL);
     if (!ip[0]) {
-        MessageBoxW(g_hMain, L"请填写 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请填写接收机 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
-    /* IP 格式校验 */
-    unsigned long nip = inet_addr(ip);
-    if (nip == INADDR_NONE) {
+    if (inet_addr(ip) == INADDR_NONE) {
         MessageBoxW(g_hMain, L"IP 地址格式不正确", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
-    int port = _wtoi(wport);
-    if (port <= 0 || port > 65535) {
-        MessageBoxW(g_hMain, L"数据端口必须在 1-65535 范围内", L"提示", MB_OK | MB_ICONWARNING);
-        return;
-    }
-    /* SET_NET: [mac 6B][ip 4B][port 2B BE], 掩码固定 255.255.255.0 网关自动派生 */
-    if (UdpManager_SetNet(g_cfgUdp[UDP_TAB_CFG], g_devMac, ip, (uint16_t)port)) {
-        MessageBoxW(g_hMain, L"网络参数已发送\n重启接收器后生效", L"成功",
-                    MB_OK | MB_ICONINFORMATION);
+    /* SET_IP: [ip 4B BE] → [1B: 1=成功/0=失败]. 失败 = IP 非法 或 DHCP 模式 */
+    bool ok = false;
+    if (UdpManager_SetIp(g_cfgUdp[UDP_TAB_CFG], ip, &ok)) {
+        if (ok) {
+            MessageBoxW(g_hMain, L"接收机 IP 已设置, 重启后生效", L"成功",
+                        MB_OK | MB_ICONINFORMATION);
+        } else {
+            MessageBoxW(g_hMain, L"设备拒绝设置\n(IP 非法或处于 DHCP 模式)", L"设置失败",
+                        MB_OK | MB_ICONWARNING);
+        }
     } else {
-        MessageBoxW(g_hMain, L"设置失败 (发送命令失败)", L"错误", MB_OK | MB_ICONERROR);
+        MessageBoxW(g_hMain, L"设置失败 (接收机未响应)", L"错误", MB_OK | MB_ICONERROR);
     }
 }
 
-/* 查询接收器网络参数 (GET_NET 0x13): 回填 IP + 数据端口 + MAC 到输入框.
- * GET_NET 响应含设备 MAC, 学习后供后续 SET_NET 守卫. */
-static void OnNetQuery(HWND hChildDlg)
+/* 行1 查询 (DISCOVER 0x15): 单播发现, 回填接收机 IP + 配置端口.
+ * DISCOVER 响应 [ip 4B][config_port 2B] = 6B. */
+static void OnCfgQuery(HWND hChildDlg)
 {
     if (!g_udpConnected[UDP_TAB_CFG]) {
-        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请先连接接收机", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
-    uint8_t mac[6] = { 0 };
     char ip[16] = { 0 };
-    uint16_t port = 0;
-    if (UdpManager_GetNet(g_cfgUdp[UDP_TAB_CFG], mac, ip, sizeof(ip), &port)) {
-        /* 学习设备 MAC (供后续 SET_NET 守卫, 不在 UI 显示) */
-        memcpy(g_devMac, mac, 6);
-        g_macValid = TRUE;
-        SetWindowTextA(GetDlgItem(hChildDlg, IDC_NET_IP), ip);
+    uint16_t config_port = 0;
+    if (UdpManager_Discover(g_cfgUdp[UDP_TAB_CFG], ip, sizeof(ip), &config_port)) {
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_CFG_IP), ip);
         char port_str[8];
-        sprintf(port_str, "%d", port);
-        SetWindowTextA(GetDlgItem(hChildDlg, IDC_NET_PORT), port_str);
+        sprintf(port_str, "%d", config_port);
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_CFG_CFGPORT), port_str);
     } else {
-        MessageBoxW(g_hMain, L"查询失败 (接收器未响应)", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"查询失败 (接收机未响应 DISCOVER)", L"提示",
+                    MB_OK | MB_ICONWARNING);
     }
 }
 
-/* 设置目标主机 (SET_HOST 0x18): 固件把 nRF24 数据固定单播到此 IP:端口.
- * 上位机本地数据端口应与之相同才能收到转发的数据. */
-static void OnHostApply(HWND hChildDlg)
+/* 行2 配置 (SET_HOST 0x14): 设置上行 IP (host_ip) + 上行数据监听端口 (host_port).
+ * 固件把 nRF24 数据固定单播到此 IP:端口; 上位机本地数据端口应与之相同才能收到转发数据. */
+static void OnCfgUpApply(HWND hChildDlg)
 {
     if (!g_udpConnected[UDP_TAB_CFG]) {
-        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请先连接接收机", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
     wchar_t wip[64] = { 0 }, wport[16] = { 0 };
-    GetWindowTextW(GetDlgItem(hChildDlg, IDC_HOST_IP), wip, 64);
-    GetWindowTextW(GetDlgItem(hChildDlg, IDC_HOST_PORT), wport, 16);
+    GetWindowTextW(GetDlgItem(hChildDlg, IDC_CFG_UPIP), wip, 64);
+    GetWindowTextW(GetDlgItem(hChildDlg, IDC_CFG_UPPORT), wport, 16);
     char ip[64] = { 0 };
     WideCharToMultiByte(CP_ACP, 0, wip, -1, ip, sizeof(ip), NULL, NULL);
     if (!ip[0]) {
-        MessageBoxW(g_hMain, L"请填写上位机 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请填写上行 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
     if (inet_addr(ip) == INADDR_NONE) {
@@ -901,57 +920,59 @@ static void OnHostApply(HWND hChildDlg)
         return;
     }
     int port = _wtoi(wport);
-    if (port <= 0 || port > 65535) port = 8602;
+    if (port <= 0 || port > 65535) port = 9602;   /* 默认 host_port 9602 */
     if (UdpManager_SetHost(g_cfgUdp[UDP_TAB_CFG], ip, (uint16_t)port)) {
-        MessageBoxW(g_hMain, L"目标主机已设置\n固件 nRF24 数据将转发到此地址", L"成功",
+        MessageBoxW(g_hMain, L"上行参数已设置\n接收机 nRF24 数据将转发到此地址", L"成功",
                     MB_OK | MB_ICONINFORMATION);
     } else {
         MessageBoxW(g_hMain, L"设置失败 (发送命令失败)", L"错误", MB_OK | MB_ICONERROR);
     }
 }
 
-/* 查询目标主机 (GET_HOST 0x19): 回填上位机 IP + 端口. */
-static void OnHostQuery(HWND hChildDlg)
+/* 行2 查询 (GET_NET 0x11): 回填上行 IP + 上行端口 (host_port) + 数据端口 (data_port, 只读).
+ * GET_NET 响应 [data_port 2B][host_ip 4B][host_port 2B] = 8B. */
+static void OnCfgUpQuery(HWND hChildDlg)
 {
     if (!g_udpConnected[UDP_TAB_CFG]) {
-        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请先连接接收机", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
-    char ip[16] = { 0 };
-    uint16_t port = 0;
-    if (UdpManager_GetHost(g_cfgUdp[UDP_TAB_CFG], ip, sizeof(ip), &port)) {
-        SetWindowTextA(GetDlgItem(hChildDlg, IDC_HOST_IP), ip);
+    char host_ip[16] = { 0 };
+    uint16_t data_port = 0, host_port = 0;
+    if (UdpManager_GetNet(g_cfgUdp[UDP_TAB_CFG], &data_port, host_ip, sizeof(host_ip), &host_port)) {
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_CFG_UPIP), host_ip);
         char port_str[8];
-        sprintf(port_str, "%d", port);
-        SetWindowTextA(GetDlgItem(hChildDlg, IDC_HOST_PORT), port_str);
+        sprintf(port_str, "%d", host_port);
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_CFG_UPPORT), port_str);
+        sprintf(port_str, "%d", data_port);
+        SetWindowTextA(GetDlgItem(hChildDlg, IDC_CFG_DATAPORT), port_str);
     } else {
-        MessageBoxW(g_hMain, L"查询失败 (接收器未响应)", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"查询失败 (接收机未响应)", L"提示", MB_OK | MB_ICONWARNING);
     }
 }
 
-/* 获取手柄 CAN 固件版本并显示 (Tab2). CAN 版本是 uint32: 高中低字节=主次补丁 */
+/* 获取手柄 CAN 固件版本并显示 (Tab2). 新版固件回多帧拼接的版本字符串 (如 v0.1.4_0b4ee3). */
 static void OnGetVersionCan(HWND hChildDlg)
 {
     if (g_canTabChannel[CAN_TAB_UPGRADE] < 0) {
         MessageBoxW(g_hMain, L"请先连接手柄", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
-    uint32_t ver = 0;
-    if (CanManager_GetVersion(g_canTab[CAN_TAB_UPGRADE], &ver)) {
-        wchar_t vstr[32];
-        swprintf(vstr, 32, L"%d.%d.%d",
-                 (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
-        SetWindowTextW(GetDlgItem(hChildDlg, IDC_HFW_VERSION), vstr);
+    char ver[64] = { 0 };
+    if (CanManager_GetVersionStr(g_canTab[CAN_TAB_UPGRADE], ver, sizeof(ver))) {
+        wchar_t wver[64];
+        MultiByteToWideChar(CP_ACP, 0, ver, -1, wver, 64);
+        SetWindowTextW(GetDlgItem(hChildDlg, IDC_HFW_VERSION), wver);
     } else {
         SetWindowTextW(GetDlgItem(hChildDlg, IDC_HFW_VERSION), L"读取失败");
     }
 }
 
-/* 获取接收器 UDP 固件版本并显示 (Tab3). UDP 版本是字符串 (如 "0.1.0-dev") */
+/* 获取接收机 UDP 固件版本并显示 (Tab3). 新版固件回版本字符串 (如 v0.1.0_0b4ee3) */
 static void OnGetVersionUdp(HWND hChildDlg)
 {
     if (!g_udpConnected[UDP_TAB_CFG]) {
-        MessageBoxW(g_hMain, L"请先连接接收器", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请先连接接收机", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
     char ver[64] = { 0 };
@@ -964,11 +985,11 @@ static void OnGetVersionUdp(HWND hChildDlg)
     }
 }
 
-/* 检测绑定状态: 读手柄 NRF + 接收器 NRF, 比对 */
+/* 检测绑定状态: 读手柄 NRF + 接收机 NRF, 比对 */
 static void OnCheckBind(HWND hChildDlg)
 {
     if (g_canTabChannel[CAN_TAB_BIND] < 0 || !g_udpConnected[UDP_TAB_BIND]) {
-        MessageBoxW(g_hMain, L"请先连接手柄和接收器", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请先连接手柄和接收机", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
     /* 1. 读手柄 NRF */
@@ -977,10 +998,10 @@ static void OnCheckBind(HWND hChildDlg)
                     MB_OK | MB_ICONERROR);
         return;
     }
-    /* 2. 读接收器 NRF */
-    if (!UdpManager_GetRF24(g_cfgUdp[UDP_TAB_BIND], &g_receiverCh, g_receiverAddr)) {
+    /* 2. 读接收机 NRF */
+    if (!UdpManager_GetRF24(g_cfgUdp[UDP_TAB_BIND], g_receiverAddr)) {
         MessageBoxW(g_hMain,
-            L"读取接收器 NRF 地址超时\n请确认接收器已上电并在同一网络",
+            L"读取接收机 NRF 地址超时\n请确认接收机已上电并在同一网络",
             L"错误", MB_OK | MB_ICONERROR);
         return;
     }
@@ -992,23 +1013,23 @@ static void OnCheckBind(HWND hChildDlg)
     /* 只显示绑定状态结论, 不显示地址 */
     if (all_zero) {
         MessageBoxW(g_hMain,
-            L"当前手柄和接收器未绑定\n点击「绑定设备」可绑定当前手柄和接收器",
+            L"当前手柄和接收机未绑定\n点击「绑定设备」可绑定当前手柄和接收机",
             L"绑定状态: 未绑定", MB_OK | MB_ICONINFORMATION);
     } else if (!same) {
         MessageBoxW(g_hMain,
-            L"当前手柄和接收器未绑定\n接收器已绑定其他设备\n点击「绑定设备」可重新绑定当前手柄和接收器",
+            L"当前手柄和接收机未绑定\n接收机已绑定其他设备\n点击「绑定设备」可重新绑定当前手柄和接收机",
             L"绑定状态: 未绑定", MB_OK | MB_ICONWARNING);
     } else {
-        MessageBoxW(g_hMain, L"当前手柄和接收器已绑定", L"绑定状态: 已绑定", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(g_hMain, L"当前手柄和接收机已绑定", L"绑定状态: 已绑定", MB_OK | MB_ICONINFORMATION);
     }
 }
 
-/* 绑定设备: 把手柄 NRF 地址写入接收器 */
+/* 绑定设备: 把手柄 NRF 地址写入接收机 */
 static void OnBind(HWND hChildDlg)
 {
     (void)hChildDlg;
     if (g_canTabChannel[CAN_TAB_BIND] < 0 || !g_udpConnected[UDP_TAB_BIND]) {
-        MessageBoxW(g_hMain, L"请先连接手柄和接收器", L"提示", MB_OK | MB_ICONWARNING);
+        MessageBoxW(g_hMain, L"请先连接手柄和接收机", L"提示", MB_OK | MB_ICONWARNING);
         return;
     }
     /* 确保已有手柄地址 (没读过则先读) */
@@ -1019,25 +1040,24 @@ static void OnBind(HWND hChildDlg)
             return;
         }
     }
-    /* 先读接收器地址, 检查是否已绑定当前手柄 */
+    /* 先读接收机地址, 检查是否已绑定当前手柄 */
     uint8_t recvAddr[5];
-    uint8_t recvCh;
-    if (!UdpManager_GetRF24(g_cfgUdp[UDP_TAB_BIND], &recvCh, recvAddr)) {
-        MessageBoxW(g_hMain, L"读取接收器地址超时", L"错误",
+    if (!UdpManager_GetRF24(g_cfgUdp[UDP_TAB_BIND], recvAddr)) {
+        MessageBoxW(g_hMain, L"读取接收机地址超时", L"错误",
                     MB_OK | MB_ICONERROR);
         return;
     }
     BOOL recvBound = (recvAddr[0]|recvAddr[1]|recvAddr[2]|recvAddr[3]|recvAddr[4]) != 0;
     if (recvBound && memcmp(recvAddr, g_handlerAddr, 5) == 0) {
-        MessageBoxW(g_hMain, L"当前手柄和接收器已绑定", L"已绑定",
+        MessageBoxW(g_hMain, L"当前手柄和接收机已绑定", L"已绑定",
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (MessageBoxW(g_hMain, L"确认绑定当前手柄和接收器吗?",
+    if (MessageBoxW(g_hMain, L"确认绑定当前手柄和接收机吗?",
                     L"确认绑定", MB_YESNO | MB_ICONQUESTION) != IDYES) {
         return;
     }
-    if (UdpManager_SetRF24(g_cfgUdp[UDP_TAB_BIND], g_handlerCh, g_handlerAddr)) {
+    if (UdpManager_SetRF24(g_cfgUdp[UDP_TAB_BIND], g_handlerAddr)) {
         MessageBoxW(g_hMain, L"绑定成功", L"绑定成功", MB_OK | MB_ICONINFORMATION);
     } else {
         MessageBoxW(g_hMain, L"绑定失败", L"错误",
@@ -1228,13 +1248,14 @@ static DWORD WINAPI fw_upgrade_thread(LPVOID param)
     return 0;
 }
 
-/* 主窗口收到子对话框转发的命令: hChildDlg=子对话框句柄, wParam 含控件 ID (LOWORD) */
+/* 主窗口收到子对话框转发的命令: hChildDlg=子对话框句柄, wParam 含控件 ID (LOWORD).
+ * tabIdx (GWLP_USERDATA): 0=接收机配置 1=手柄绑定 2=固件升级 3=设备查找 */
 static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
 {
     int cmdId = LOWORD(wParam);
     int tabIdx = (int)GetWindowLongPtrW(hChildDlg, GWLP_USERDATA);
 
-    /* CAN/UDP 连接命令三 tab 共享 (Tab1/Tab2 有 CAN, Tab1/Tab3 有 UDP) */
+    /* CAN/UDP 连接命令多 tab 共享 (Tab1/Tab2 有 CAN; Tab0/Tab1/Tab2 有 UDP) */
     switch (cmdId) {
     case IDC_CAN_REFRESH:       RefreshCanDevices(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), tabIdx); return;
     case IDC_CAN_CONNECT:       OnCanConnect(hChildDlg);   return;
@@ -1242,13 +1263,21 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
     }
 
     if (tabIdx == 0) {
+        /* 接收机配置页: 行1 (SET_IP/DISCOVER) + 行2 (SET_HOST/GET_NET) */
+        switch (cmdId) {
+        case IDC_CFG_APPLY:         OnCfgApply(hChildDlg);    break;
+        case IDC_CFG_QUERY:         OnCfgQuery(hChildDlg);    break;
+        case IDC_CFG_UPAPPLY:       OnCfgUpApply(hChildDlg);  break;
+        case IDC_CFG_UPQUERY:       OnCfgUpQuery(hChildDlg);  break;
+        }
+    } else if (tabIdx == 1) {
         /* 手柄绑定页: 剩余专属按钮 */
         switch (cmdId) {
         case IDC_BTN_CHECK_BIND:    OnCheckBind(hChildDlg);    break;
         case IDC_BTN_BIND:          OnBind(hChildDlg);         break;
         }
-    } else if (tabIdx == 1) {
-        /* 手柄固件升级页 (CAN) */
+    } else if (tabIdx == 2) {
+        /* 固件升级页: 上半 CAN 手柄升级 (HFW) + 下半 UDP 接收机升级 (TFW) */
         switch (cmdId) {
         case IDC_HFW_BROWSE: {
             OPENFILENAMEA ofn;
@@ -1283,10 +1312,6 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
             }
             break;
         case IDC_HFW_GETVER:          OnGetVersionCan(hChildDlg); break;
-        }
-    } else if (tabIdx == 2) {
-        /* 接收器固件升级页 (UDP) */
-        switch (cmdId) {
         case IDC_TFW_BROWSE: {
             OPENFILENAMEA ofn;
             char file[MAX_PATH] = { 0 };
@@ -1314,14 +1339,10 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
                 param->isCan = 0;
                 CreateThread(NULL, 0, fw_upgrade_thread, param, 0, NULL);
             } else if (!g_udpConnected[UDP_TAB_CFG]) {
-                MessageBoxW(g_hMain, L"请先连接接收器", L"提示",
+                MessageBoxW(g_hMain, L"请先连接接收机", L"提示",
                             MB_OK | MB_ICONWARNING);
             }
             break;
-        case IDC_NET_APPLY:          OnNetApply(hChildDlg);    break;
-        case IDC_NET_QUERY:          OnNetQuery(hChildDlg);    break;
-        case IDC_HOST_APPLY:         OnHostApply(hChildDlg);   break;
-        case IDC_HOST_QUERY:         OnHostQuery(hChildDlg);   break;
         case IDC_TFW_GETVER:         OnGetVersionUdp(hChildDlg); break;
         }
     } else if (tabIdx == 3) {
@@ -1336,18 +1357,18 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
 /* 创建 Tab 控件 + 3 个子对话框, 在 WM_CREATE 中调用 */
 static void CreateTabLayout(HWND hWnd)
 {
-    /* Tab 控件位于顶部 */
+    /* Tab 控件位于顶部 (高 324: 内容最高 Tab2≈276 + 标题栏 24 + 边距余量) */
     g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_TABS,
-            0, 0, 480, 380, hWnd, (HMENU)1, g_hInst, NULL);
+            0, 0, 480, 324, hWnd, (HMENU)1, g_hInst, NULL);
 
-    /* 三个页签标题 */
+    /* 四个页签标题 (从左到右: 接收机配置 / 手柄绑定 / 固件升级 / 设备查找) */
     TCITEMW ti; ti.mask = TCIF_TEXT;
-    ti.pszText = (LPWSTR)L"手柄绑定";
+    ti.pszText = (LPWSTR)L"接收机配置";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 0, (LPARAM)&ti);
-    ti.pszText = (LPWSTR)L"手柄升级";
+    ti.pszText = (LPWSTR)L"手柄绑定";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 1, (LPARAM)&ti);
-    ti.pszText = (LPWSTR)L"手柄接收端配置";
+    ti.pszText = (LPWSTR)L"固件升级";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 2, (LPARAM)&ti);
     ti.pszText = (LPWSTR)L"设备查找";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 3, (LPARAM)&ti);
@@ -1375,10 +1396,10 @@ static void CreateTabLayout(HWND hWnd)
         ShowWindow(g_hTabDlg[i], i == 0 ? SW_SHOW : SW_HIDE);
     }
 
-    /* 创建各 tab 控件 */
-    CreateBindTabControls(g_hTabDlg[0]);
-    CreateHandlerFwTabControls(g_hTabDlg[1]);
-    CreateTransmitterFwTabControls(g_hTabDlg[2]);
+    /* 创建各 tab 控件 (按新索引: 0=接收机配置 1=手柄绑定 2=固件升级 3=设备查找) */
+    CreateReceiverConfigTabControls(g_hTabDlg[0]);
+    CreateBindTabControls(g_hTabDlg[1]);
+    CreateFwUpgradeTabControls(g_hTabDlg[2]);
     CreateDiscoverTabControls(g_hTabDlg[3]);
 
     /* 初始按钮状态: 未连接 → 禁用依赖连接的操作 (升级/版本/目标主机) */
@@ -1588,10 +1609,10 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_FW_COMPLETE: {
         BOOL isCan = (wParam == 1);
         BOOL success = (lParam == 1);
-        /* 恢复对应 tab 的升级/浏览按钮 */
+        /* CAN 手柄升级 (HFW) 与 UDP 接收机升级 (TFW) 都在 Tab2 (g_hTabDlg[2]) */
         int upgradeId = isCan ? IDC_HFW_UPGRADE : IDC_TFW_UPGRADE;
         int browseId  = isCan ? IDC_HFW_BROWSE  : IDC_TFW_BROWSE;
-        HWND hTabChild = isCan ? g_hTabDlg[1] : g_hTabDlg[2];
+        HWND hTabChild = g_hTabDlg[2];
         EnableWindow(GetDlgItem(hTabChild, upgradeId), TRUE);
         EnableWindow(GetDlgItem(hTabChild, browseId), TRUE);
         FW_Done(hWnd, success);
@@ -1604,7 +1625,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         BOOL isCan = (wParam == 1);
         int upgradeId = isCan ? IDC_HFW_UPGRADE : IDC_TFW_UPGRADE;
         int browseId  = isCan ? IDC_HFW_BROWSE  : IDC_TFW_BROWSE;
-        HWND hTabChild = isCan ? g_hTabDlg[1] : g_hTabDlg[2];
+        HWND hTabChild = g_hTabDlg[2];
         if (g_progressDlg) {
             g_progressDone = TRUE;
             DestroyWindow(g_progressDlg);  /* WM_DESTROY 会清空 g_progressDlg 等全局 */
@@ -1664,8 +1685,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     wc.lpszClassName = L"ZCodeHandlerReceiver";
     RegisterClassW(&wc);
 
-    /* 主窗口尺寸 480x400 (含 tab 显示区) */
-    RECT rc = { 0, 0, 480, 400 };
+    /* 主窗口尺寸 480x344 (含 tab 显示区 324 + 标题栏/边框) */
+    RECT rc = { 0, 0, 480, 344 };
     AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX, FALSE, 0);
 
     int winW = rc.right - rc.left, winH = rc.bottom - rc.top;
@@ -1675,7 +1696,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (sx < 0) sx = 0;
     if (sy < 0) sy = 0;
 
-    HWND hWnd = CreateWindowExW(0, L"ZCodeHandlerReceiver", L"手柄-接收器工具",
+    HWND hWnd = CreateWindowExW(0, L"ZCodeHandlerReceiver", L"手柄-接收机工具",
             WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
             sx, sy, winW, winH,
             NULL, NULL, hInstance, NULL);
