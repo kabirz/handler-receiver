@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(HandlerReceiver VERSION 1.0.0 LANGUAGES C)
+project(HandlerReceiver VERSION 1.0.0 LANGUAGES C RC)
 
 set(CMAKE_C_STANDARD 11)
 
