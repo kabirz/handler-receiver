@@ -31,6 +31,7 @@ enum udp_cmd {
 	UDP_CMD_GET_RF24    = 0x13,  /* (空) → [addr 5B] (信道固定 1, 不返回) */
 	UDP_CMD_SET_HOST    = 0x14,  /* [host_ip 4B][port 2B BE] = 6B → 同序回显 6B (持久化) */
 	UDP_CMD_DISCOVER    = 0x15,  /* (空) → [ip 4B][config_port 2B] = 6B (广播发现) */
+	UDP_CMD_FACTORY_RESET = 0x16, /* (空) → [1B: 1=成功/0=失败] (恢复出厂, 固件内部完成并重启) */
 };
 
 /* 通道类型: 一个 UdpManager 实例对应一个通道 (单 socket).
@@ -102,6 +103,11 @@ bool UdpManager_GetRF24(UdpManager *mgr, uint8_t *addr);
 /* 上位机目标 (HOST) 配置 (走配置实例): 固件把 nRF24 数据固定单播到
  * host_ip:host_port (默认 192.168.11.150:9602, 持久化). 仅 set; 查询改用 GetNet. */
 bool UdpManager_SetHost(UdpManager *mgr, const char *ip, uint16_t port);
+
+/* FACTORY_RESET (0x16): (空) → [1B: 1=成功/0=失败].
+ * 固件内部恢复全部出厂参数 (RF24/IP/HOST 等) 并自行重启, 上位机无需再发 Reboot.
+ * out_ok 可为 NULL; 返回 true 仅表示收到回复. */
+bool UdpManager_FactoryReset(UdpManager *mgr, bool *out_ok);
 
 /* DISCOVER (0x15): 广播发现设备. (空) → [ip 4B][config_port 2B] = 6B.
  * ip 为点分十进制输出缓冲 (容量 ip_len ≥ 16). config_port 出参可空.

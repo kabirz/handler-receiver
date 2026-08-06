@@ -76,6 +76,8 @@
 #define IDC_CFG_DATAPORT         1506   /* 行2 接收机数据监听端口 (只读, data_port) */
 #define IDC_CFG_UPAPPLY          1507   /* 行2 配置按钮 (SET_HOST) */
 #define IDC_CFG_UPQUERY          1508   /* 行2 查询按钮 (GET_NET) */
+#define IDC_CFG_FACTORY_RESET    1509   /* 恢复出厂设置 (FACTORY_RESET 0x16) */
+#define IDC_CFG_REBOOT           1510   /* 重启接收机 (REBOOT 0x05) */
 /* Tab4 设备查找 */
 #define IDC_DISC_START           1301   /* 开始/停止查找 按钮 */
 #define IDC_DISC_LIST            1302   /* 发现的 IP 列表 (LISTBOX) */
@@ -567,6 +569,22 @@ static void CreateReceiverConfigTabControls(HWND hDlg)
             386, g2y + 56, 44, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_UPQUERY, g_hInst, NULL);
     SendMessageW(hUpQuery, WM_SETFONT, (WPARAM)hFont, TRUE);
     (void)hCfgApply; (void)hCfgQuery; (void)hUpApply; (void)hUpQuery;
+
+    /* ===== 操作按钮: 连接 / 恢复出厂设置 / 重启 (与连接按钮同排, 整体右对齐到 436).
+     * 连接按钮由 CreateUdpGroupBox 共享创建 (原 x=366,w=70, 右边贴 436), 在本 tab 需左移,
+     * 让出空间给两个新按钮, 三者以 groupbox 右边 436 为基线右对齐. 按钮行 y = 6+22 = 28. */
+    int by = 6 + 22;
+    HWND hConn = GetDlgItem(hDlg, IDC_UDP_CONNECT);  /* 连接 (最左) */
+    if (hConn) SetWindowPos(hConn, NULL, 210, by, 66, 22, SWP_NOZORDER);
+    HWND hReset = CreateWindowExW(0, L"BUTTON", L"恢复出厂设置",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            282, by, 88, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_FACTORY_RESET, g_hInst, NULL);
+    SendMessageW(hReset, WM_SETFONT, (WPARAM)hFont, TRUE);
+    HWND hReboot = CreateWindowExW(0, L"BUTTON", L"重启",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            376, by, 60, 22, hDlg, (HMENU)(INT_PTR)IDC_CFG_REBOOT, g_hInst, NULL);
+    SendMessageW(hReboot, WM_SETFONT, (WPARAM)hFont, TRUE);
+    (void)hConn;
 }
 
 /* 创建 Tab2 固件升级控件: 上 CAN 手柄升级 + 下 UDP 接收机升级 */
@@ -1396,6 +1414,56 @@ static void OnCfgUpQuery(HWND hChildDlg)
     }
 }
 
+/* 恢复出厂设置: 由固件 (FACTORY_RESET 0x16) 内部统一恢复全部出厂参数并自行重启.
+ * 上位机只发一条命令, 不再分别设置 RF24/HOST/IP, 也无需再发 Reboot. */
+static void OnCfgFactoryReset(HWND hChildDlg)
+{
+    (void)hChildDlg;
+    if (!g_udpConnected[UDP_TAB_CFG]) {
+        MessageBoxW(g_hMain, L"请先连接接收机", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (MessageBoxW(g_hMain, L"确认恢复所有默认参数吗?",
+                    L"恢复出厂设置", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        return;
+    }
+    /* FACTORY_RESET (0x16): 固件内部恢复全部出厂参数并自行重启 */
+    bool ok = false;
+    if (UdpManager_FactoryReset(g_cfgUdp[UDP_TAB_CFG], &ok)) {
+        if (ok) {
+            MessageBoxW(g_hMain, L"已恢复所有默认参数, 接收机正在重启",
+                        L"恢复出厂设置", MB_OK | MB_ICONINFORMATION);
+        } else {
+            MessageBoxW(g_hMain, L"接收机拒绝恢复出厂设置", L"设置失败",
+                        MB_OK | MB_ICONWARNING);
+        }
+    } else {
+        MessageBoxW(g_hMain, L"恢复失败 (接收机未响应)", L"错误",
+                    MB_OK | MB_ICONERROR);
+    }
+}
+
+/* 重启接收机: REBOOT (0x05). 重启后当前连接失效, 需重新连接. */
+static void OnCfgReboot(HWND hChildDlg)
+{
+    (void)hChildDlg;
+    if (!g_udpConnected[UDP_TAB_CFG]) {
+        MessageBoxW(g_hMain, L"请先连接接收机", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (MessageBoxW(g_hMain, L"确认重启接收机吗?",
+                    L"重启接收机", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        return;
+    }
+    if (UdpManager_Reboot(g_cfgUdp[UDP_TAB_CFG])) {
+        MessageBoxW(g_hMain, L"接收机正在重启", L"重启接收机",
+                    MB_OK | MB_ICONINFORMATION);
+    } else {
+        MessageBoxW(g_hMain, L"重启失败 (接收机未响应)", L"错误",
+                    MB_OK | MB_ICONERROR);
+    }
+}
+
 /* 获取手柄 CAN 固件版本并显示 (Tab2). 新版固件回多帧拼接的版本字符串 (如 v0.1.4_0b4ee3).
  * alertOnFail=TRUE 时读取失败会弹框提示, 用于连接后自动读取场景. */
 static void OnGetVersionCan(HWND hChildDlg, BOOL alertOnFail)
@@ -1722,10 +1790,12 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
     if (tabIdx == 0) {
         /* 接收机配置页: 行1 (SET_IP/DISCOVER) + 行2 (SET_HOST/GET_NET) */
         switch (cmdId) {
-        case IDC_CFG_APPLY:         OnCfgApply(hChildDlg);    break;
-        case IDC_CFG_QUERY:         OnCfgQuery(hChildDlg);    break;
-        case IDC_CFG_UPAPPLY:       OnCfgUpApply(hChildDlg);  break;
-        case IDC_CFG_UPQUERY:       OnCfgUpQuery(hChildDlg);  break;
+        case IDC_CFG_APPLY:         OnCfgApply(hChildDlg);         break;
+        case IDC_CFG_QUERY:         OnCfgQuery(hChildDlg);         break;
+        case IDC_CFG_UPAPPLY:       OnCfgUpApply(hChildDlg);       break;
+        case IDC_CFG_UPQUERY:       OnCfgUpQuery(hChildDlg);       break;
+        case IDC_CFG_FACTORY_RESET: OnCfgFactoryReset(hChildDlg);  break;
+        case IDC_CFG_REBOOT:        OnCfgReboot(hChildDlg);        break;
         }
     } else if (tabIdx == 1) {
         /* 手柄绑定页: 剩余专属按钮 */

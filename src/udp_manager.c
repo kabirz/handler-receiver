@@ -533,6 +533,19 @@ bool UdpManager_SetHost(UdpManager *mgr, const char *ip, uint16_t port)
 	return UdpManager_SendCommand(mgr, UDP_CMD_SET_HOST, data, sizeof(data));
 }
 
+/* 恢复出厂设置: (空) → [1B: 1=成功/0=失败].
+ * 固件内部恢复全部出厂参数 (RF24/IP/HOST 等) 并自行重启, 上位机无需再发 Reboot. */
+bool UdpManager_FactoryReset(UdpManager *mgr, bool *out_ok)
+{
+	uint8_t resp = 0;
+	int n = fw_exchange(mgr, UDP_CMD_FACTORY_RESET, NULL, 0, &resp, 1, UDP_RESP_TIMEOUT_MS);
+
+	bool ok = (n == 1 && resp == 1);
+	if (out_ok) *out_ok = ok;
+	/* 收到回复 (无论成功/失败) 即返回 true; out_ok 区分结果 */
+	return (n == 1);
+}
+
 /* DISCOVER (0x15): 广播发现设备. (空) → [ip 4B BE][config_port 2B BE] = 6B.
  * ip 为设备本机 IP (点分十进制, 容量 ip_len ≥ 16); config_port 出参可空.
  * 同步等待回复 (500ms 超时). */
