@@ -2222,7 +2222,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* 统一放大字体 (DEFAULT_GUI_FONT 9pt → 1.5x ≈ 13.5pt = -18), 供所有控件缩放后使用 */
     g_hUiFont = CreateFontW(S(-12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
 
     /* 主窗口尺寸 480x344 ×SCALE (1.5x → 720x516 客户区, 含 tab 显示区) */
     RECT rc = { 0, 0, S(480), S(344) };
