@@ -24,6 +24,15 @@
 
 #pragma comment(lib, "comctl32.lib")
 
+/* 应用版本号 (由 CMakeLists.txt 的 APP_VERSION_MAJOR/MINOR/PATCH 宏传入).
+ * 两层宏 + # 字符串化为窄串, 再用 L"" 前缀拼接成宽字符串 "主.次.修订"
+ * (MSVC 不支持 L#x 写法, 故用 L"" "..." 相邻字面量拼接). */
+#define ZC_STR2(x) #x
+#define ZC_STR(x)  ZC_STR2(x)
+#define APP_VERSION_W L"" ZC_STR(APP_VERSION_MAJOR) L"." \
+                      L"" ZC_STR(APP_VERSION_MINOR) L"." \
+                      L"" ZC_STR(APP_VERSION_PATCH)
+
 /* 自定义窗口消息 (工作线程 -> UI 线程) */
 #define WM_UPDATE_LOG        (WM_APP + 1)
 #define WM_UPDATE_PROGRESS   (WM_APP + 3)
@@ -992,8 +1001,8 @@ static BOOL ReadHandlerNrf(void)
 }
 
 /* 前向声明: 连接成功后自动读版本, 定义在后面 */
-static void OnGetVersionCan(HWND hChildDlg);
-static void OnGetVersionUdp(HWND hChildDlg);
+static void OnGetVersionCan(HWND hChildDlg, BOOL alertOnFail);
+static void OnGetVersionUdp(HWND hChildDlg, BOOL alertOnFail);
 
 /* CAN 连接/断开 (各 tab 独立). hChildDlg 的 GWLP_USERDATA 给出 tab 索引.
  * 新布局: Tab1(手柄绑定)→CAN_TAB_BIND, Tab2(固件升级)→CAN_TAB_UPGRADE. 失败友好提示占用原因. */
@@ -1023,7 +1032,7 @@ static void OnCanConnect(HWND hChildDlg)
     WideCharToMultiByte(CP_ACP, 0, wname, -1, dev, sizeof(dev), NULL, NULL);
 
     int channel = 0;
-    sscanf(dev, "PCAN_USB_%d (0x%X)", &channel, &channel);
+    sscanf(dev, "PCAN-USB: %Xh", &channel);
 
     /* 先检查: 另一个 CAN tab 是否已占同一 channel → 友好提示 */
     for (int other = 0; other < CAN_TAB_COUNT; other++) {
@@ -1072,8 +1081,8 @@ static void OnCanConnect(HWND hChildDlg)
     g_canTabChannel[canTabIdx] = channel;
     SyncCanConnState(canTabIdx);
     if (canTabIdx == CAN_TAB_UPGRADE) {
-        /* 升级 tab 连接成功后自动读版本 */
-        OnGetVersionCan(hChildDlg);
+        /* 升级 tab 连接成功后自动读版本; 失败弹框提示用户检查连接 */
+        OnGetVersionCan(hChildDlg, TRUE);
     }
 }
 
@@ -1153,8 +1162,9 @@ static void OnUdpConnect(HWND hChildDlg)
     g_udpBroadcast[udpTab] = is_limited_bcast;
     SyncUdpConnState(udpTab);
     if (udpTab == UDP_TAB_CFG && !is_limited_bcast && GetDlgItem(hChildDlg, IDC_TFW_VERSION)) {
-        /* Tab2 (固件升级) 单播连接成功后自动读版本 (Tab0 无版本框会跳过; 广播模式跳过: 多设备歧义) */
-        OnGetVersionUdp(hChildDlg);
+        /* Tab2 (固件升级) 单播连接成功后自动读版本 (Tab0 无版本框会跳过; 广播模式跳过: 多设备歧义);
+         * 失败弹框提示用户检查连接 */
+        OnGetVersionUdp(hChildDlg, TRUE);
     }
 }
 
@@ -1240,7 +1250,9 @@ static void OnDiscoverStart(HWND hChildDlg)
         SetWindowTextW(GetDlgItem(hChildDlg, IDC_DISC_START), L"开始查找");
         return;
     }
-    /* 开始查找: 不清空列表 (累积去重, 多次扫描同一 IP 只显示一次), 启动发现线程 */
+    /* 开始查找: 先清空历史记录, 再启动发现线程 */
+    HWND hList = GetDlgItem(hChildDlg, IDC_DISC_LIST);
+    SendMessageW(hList, LB_RESETCONTENT, 0, 0);
     g_discRunning = TRUE;
     SetWindowTextW(GetDlgItem(hChildDlg, IDC_DISC_START), L"停止查找");
     CreateThread(NULL, 0, discover_thread, NULL, 0, NULL);
@@ -1384,8 +1396,9 @@ static void OnCfgUpQuery(HWND hChildDlg)
     }
 }
 
-/* 获取手柄 CAN 固件版本并显示 (Tab2). 新版固件回多帧拼接的版本字符串 (如 v0.1.4_0b4ee3). */
-static void OnGetVersionCan(HWND hChildDlg)
+/* 获取手柄 CAN 固件版本并显示 (Tab2). 新版固件回多帧拼接的版本字符串 (如 v0.1.4_0b4ee3).
+ * alertOnFail=TRUE 时读取失败会弹框提示, 用于连接后自动读取场景. */
+static void OnGetVersionCan(HWND hChildDlg, BOOL alertOnFail)
 {
     if (g_canTabChannel[CAN_TAB_UPGRADE] < 0) {
         MessageBoxW(g_hMain, L"请先连接手柄", L"提示", MB_OK | MB_ICONWARNING);
@@ -1398,11 +1411,17 @@ static void OnGetVersionCan(HWND hChildDlg)
         SetWindowTextW(GetDlgItem(hChildDlg, IDC_HFW_VERSION), wver);
     } else {
         SetWindowTextW(GetDlgItem(hChildDlg, IDC_HFW_VERSION), L"读取失败");
+        if (alertOnFail) {
+            MessageBoxW(g_hMain,
+                L"读取手柄固件版本失败，请确定设备是否正确连接。",
+                L"固件升级", MB_OK | MB_ICONWARNING);
+        }
     }
 }
 
-/* 获取接收机 UDP 固件版本并显示 (Tab3). 新版固件回版本字符串 (如 v0.1.0_0b4ee3) */
-static void OnGetVersionUdp(HWND hChildDlg)
+/* 获取接收机 UDP 固件版本并显示 (Tab3). 新版固件回版本字符串 (如 v0.1.0_0b4ee3).
+ * alertOnFail=TRUE 时读取失败会弹框提示, 用于连接后自动读取场景. */
+static void OnGetVersionUdp(HWND hChildDlg, BOOL alertOnFail)
 {
     if (!g_udpConnected[UDP_TAB_CFG]) {
         MessageBoxW(g_hMain, L"请先连接接收机", L"提示", MB_OK | MB_ICONWARNING);
@@ -1415,6 +1434,11 @@ static void OnGetVersionUdp(HWND hChildDlg)
         SetWindowTextW(GetDlgItem(hChildDlg, IDC_TFW_VERSION), wver);
     } else {
         SetWindowTextW(GetDlgItem(hChildDlg, IDC_TFW_VERSION), L"读取失败");
+        if (alertOnFail) {
+            MessageBoxW(g_hMain,
+                L"读取接收机固件版本失败，请确定设备是否正确连接。",
+                L"固件升级", MB_OK | MB_ICONWARNING);
+        }
     }
 }
 
@@ -1744,7 +1768,7 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
                             MB_OK | MB_ICONWARNING);
             }
             break;
-        case IDC_HFW_GETVER:          OnGetVersionCan(hChildDlg); break;
+        case IDC_HFW_GETVER:          OnGetVersionCan(hChildDlg, FALSE); break;
         case IDC_TFW_BROWSE: {
             OPENFILENAMEA ofn;
             char file[MAX_PATH] = { 0 };
@@ -1776,7 +1800,7 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
                             MB_OK | MB_ICONWARNING);
             }
             break;
-        case IDC_TFW_GETVER:         OnGetVersionUdp(hChildDlg); break;
+        case IDC_TFW_GETVER:         OnGetVersionUdp(hChildDlg, FALSE); break;
         }
     } else if (tabIdx == 3) {
         /* 设备查找页 (Tab4) */
@@ -2235,7 +2259,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (sx < 0) sx = 0;
     if (sy < 0) sy = 0;
 
-    HWND hWnd = CreateWindowExW(0, L"ZCodeHandlerReceiver", L"手柄-接收机工具",
+    HWND hWnd = CreateWindowExW(0, L"ZCodeHandlerReceiver",
+            L"手柄-接收机工具 v" APP_VERSION_W,
             WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
             sx, sy, winW, winH,
             NULL, NULL, hInstance, NULL);

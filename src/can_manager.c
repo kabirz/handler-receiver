@@ -134,7 +134,7 @@ int CanManager_DetectDevice(CanManager *mgr, char devices[][256], int max_device
 		char szLookup[64];
 		sprintf(szLookup, "devicetype=pcan_usb,controllernumber=%u", i);
 		if (Pcan_LookUpChannel(szLookup, &ch) == PCAN_ERROR_OK && ch != PCAN_NONEBUS) {
-			sprintf(devices[count], "PCAN_USB_%u (0x%X)", i, ch);
+			sprintf(devices[count], "PCAN-USB: %02Xh", ch);
 			count++;
 		}
 	}
