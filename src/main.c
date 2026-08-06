@@ -665,8 +665,8 @@ static void OnCanConnect(HWND hChildDlg)
     if (canTabIdx == CAN_TAB_BIND) {
         if (!ReadHandlerNrf()) {
             MessageBoxW(g_hMain,
-                L"连接失败\n"
-                L"请确认设备是手柄且处于CAN模式",
+                L"未识别到手柄设备\n"
+                L"请确认手柄设备未休眠且处于CAN模式",
                 L"连接失败", MB_OK | MB_ICONERROR);
             CanManager_Disconnect(g_canTab[CAN_TAB_BIND]);
             return;
