@@ -409,6 +409,11 @@ bool UdpManager_SendCommand(UdpManager *mgr, uint8_t cmd, const uint8_t *data, u
 	return udp_send_raw(mgr, buf, (int)(len + 1));
 }
 
+/* fw_exchange 定义在下方固件升级段, 此处前置声明供 UdpManager_SetIp 使用 */
+static int fw_exchange(UdpManager *mgr, uint8_t cmd,
+		       const uint8_t *data, uint16_t data_len,
+		       uint8_t *out_buf, uint8_t out_cap, DWORD timeout_ms);
+
 /* 设置设备静态 IP: [ip 4B BE] = 4B → [1B: 1=成功/0=失败].
  * 持久化, 重启生效. 失败: IP 非法 (0.0.0.0/环回/组播/广播/保留段) 或 DHCP 模式.
  * 掩码固定 255.255.255.0, 网关 = IP 末段改 1, 固件自算, 上位机不传. */

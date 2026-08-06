@@ -1,5 +1,6 @@
 out/
 build/
+.cache
 *.exe
 *.obj
 *.o

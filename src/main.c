@@ -4,6 +4,7 @@
  * Tab1: 手柄绑定 (手柄CAN扫描/连接 + 接收机UDP单播连接 + NRF读取比对 + 绑定)
  * Tab2: 固件升级 (CAN手柄升级 + UDP接收机升级)
  * Tab3: 设备查找 (DISCOVER 广播发现接收机真实 IP)
+ * 隐藏页: 调试 (经 gateway UDP 读取手柄数据 + 扫描仪数据模拟发送, Ctrl+Shift+B 切换)
  */
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -31,6 +32,7 @@
 #define WM_FW_REJECTED       (WM_APP + 11) /* keyhash/格式被拒: wParam=1 CAN/0 UDP, 销毁进度窗不显示结果 */
 #define WM_DISC_FOUND_IP     (WM_APP + 9)  /* Tab4: 发现新 IP, lParam=_strdup(ip) */
 #define WM_DISC_DONE         (WM_APP + 10) /* Tab4: 查找结束, 主线程恢复按钮文字 */
+#define WM_DBG_HANDLER       (WM_APP + 12) /* Tab5: 收到手柄状态帧, 刷新显示 */
 
 /* CAN 帧 ID 由 can_manager.h 定义 (CAN_ID_RF24_CONFIG_CMD/RESP) */
 #define RF24_CMD_GET_CONFIG      0x02
@@ -69,12 +71,34 @@
 #define IDC_DISC_START           1301   /* 开始/停止查找 按钮 */
 #define IDC_DISC_LIST            1302   /* 发现的 IP 列表 (LISTBOX) */
 #define IDC_DISC_COPY            1303   /* 复制选中 IP 到剪贴板 按钮 */
+/* Tab5 调试 */
+#define IDC_DBG_HX_VAL           1401   /* 手柄 X 角度 显示 */
+#define IDC_DBG_HY_VAL           1402   /* 手柄 Y 角度 显示 */
+#define IDC_DBG_HBTN_VAL         1403   /* 手柄 按键 显示 */
+#define IDC_DBG_HBTIME_VAL       1405   /* 手柄 最近心跳时间 显示 */
+#define IDC_DBG_HCNT_VAL         1404   /* 手柄 收到帧数 显示 */
+#define IDC_DBG_OVB              1410   /* 扫描仪: 超挖值 输入 */
+#define IDC_DBG_LASER            1411   /* 扫描仪: 激光距离 输入 */
+#define IDC_DBG_CX               1412   /* 扫描仪: 坐标 X 输入 */
+#define IDC_DBG_CY               1413   /* 扫描仪: 坐标 Y 输入 */
+#define IDC_DBG_CZ               1414   /* 扫描仪: 坐标 Z 输入 */
+#define IDC_DBG_SEND_ODO         1420   /* 发送 0x263 超挖+激光 单帧 */
+#define IDC_DBG_SEND_XY          1421   /* 发送 0x363 坐标X/Y 单帧 */
+#define IDC_DBG_SEND_Z           1422   /* 发送 0x463 坐标Z 单帧 */
+#define IDC_DBG_AUTO             1423   /* 自动周期发送 开关按钮 */
+#define IDC_DBG_PERIOD           1424   /* 自动周期 (ms) 输入 */
+#define IDC_DBG_GW_IP            1430   /* 网关 IP 输入 */
+#define IDC_DBG_LOCAL_PORT       1431   /* 本地数据端口 输入 (bind) */
+#define IDC_DBG_CONNECT          1433   /* 网关 UDP 连接/断开 按钮 */
+
+/* Tab5 调试: 网关数据端口 (收发数据帧, 与 gateway 固件默认值一致, 固定不可配) */
+#define DBG_GW_DATA_PORT_DEFAULT 9600
 
 /* 全局状态 */
 static HINSTANCE g_hInst;
 static HWND g_hMain;
 static HWND g_hTab;
-static HWND g_hTabDlg[4];
+static HWND g_hTabDlg[5];
 
 /* CAN 各 tab 独立: g_canTab[0]=Tab1 绑定用 (带 frame_cb 处理 NRF), g_canTab[1]=Tab2 升级用.
  * 每个 tab 持有独立 CanManager 实例 + 独立连接状态, 互不影响 (同一 PCAN 设备被一个 tab
@@ -97,6 +121,26 @@ static BOOL g_udpBroadcast[UDP_TAB_COUNT];  /* 目标 IP = 255.255.255.255 有�
 /* Tab4 设备查找: 原生 winsock 广播 DISCOVER (0x15), 解析回复 [ip][config_port].
  * 用独立 socket (绑 8601 = CONFIG_PORT+1, 固件跨子网回复端口), 不走 UdpManager. g_discRunning=查找中. */
 static volatile BOOL g_discRunning;
+
+/* Tab5 调试: 手柄状态帧 (0x1E3) 解析值 (RX 线程写, UI 线程读).
+ * gateway UDP 转发帧格式: [frame_id 2B BE][payload], payload 内 x/y/button 大端. */
+static volatile int g_dbgX;
+static volatile int g_dbgY;
+static volatile int g_dbgBtn;
+static volatile int g_dbgFrameCnt;
+/* 最近一次心跳 (0x763) 的本地时刻, 编码为 HHMMSS 十进制整数 */
+static volatile DWORD g_dbgHeartHMS;
+/* 自动周期发送开关 (工作线程 + UI 共用) */
+static volatile BOOL g_dbgAutoSend;
+static HANDLE g_dbgSendThread = NULL;
+/* Tab5 调试: UDP 数据通道 (收发经 gateway 的数据帧).
+ * 网关转发目标已在 Tab1 配置为指向本机, 这里只需绑定数据端口收/发. */
+static UdpManager *g_dbgUdp;
+static BOOL g_dbgUdpConnected;
+
+/* 调试 tab 默认隐藏, 用 Ctrl+Shift+B 切换显示 */
+#define IDH_TOGGLE_DEBUG  1001
+static BOOL g_dbgTabShown;
 
 /* 手柄 NRF 地址 (CAN 0x111 响应填入; 信道固定 1, 不再读取) */
 static uint8_t g_handlerAddr[5];
@@ -553,6 +597,333 @@ static void CreateDiscoverTabControls(HWND hDlg)
     SendMessageW(hList, WM_SETFONT, (WPARAM)hFont, TRUE);
 }
 
+/* 创建 Tab5 调试页控件: gateway UDP 连接 + 手柄数据显示 + 扫描仪模拟发送 */
+static void CreateDebugTabControls(HWND hDlg)
+{
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    int y = 6;
+
+    /* gateway UDP 连接: 网关IP + 本地端口 + 连接按钮, 同一行 */
+    CreateWindowExW(0, L"BUTTON", L"网关",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, y, 436, 52, hDlg, NULL, g_hInst, NULL);
+    {
+        int rowy = y + 20;
+        HWND hLbl = CreateWindowExW(0, L"STATIC", L"网关IP:",
+                WS_CHILD | WS_VISIBLE, 20, rowy, 52, 16, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hIp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+                72, rowy - 2, 90, 21, hDlg, (HMENU)(INT_PTR)IDC_DBG_GW_IP, g_hInst, NULL);
+        SendMessageW(hIp, WM_SETFONT, (WPARAM)hFont, TRUE);
+        hLbl = CreateWindowExW(0, L"STATIC", L"本地端口:",
+                WS_CHILD | WS_VISIBLE, 200, rowy, 52, 16, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hLp = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"9602",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                254, rowy - 2, 44, 21, hDlg, (HMENU)(INT_PTR)IDC_DBG_LOCAL_PORT, g_hInst, NULL);
+        SendMessageW(hLp, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hConn = CreateWindowExW(0, L"BUTTON", L"连接",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                326, rowy - 4, 110, 23, hDlg, (HMENU)(INT_PTR)IDC_DBG_CONNECT, g_hInst, NULL);
+        SendMessageW(hConn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
+    y += 60;
+
+    /* 手柄数据显示 groupbox (只读标签, 无边框, 由 WM_DBG_HANDLER 刷新):
+     * 行1: X / Y / 按键; 行2: 心跳时间 / 帧数 */
+    CreateWindowExW(0, L"BUTTON", L"手柄数据",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, y, 436, 64, hDlg, NULL, g_hInst, NULL);
+    struct { const wchar_t *label; int id; int lx; int vx; } rowsA[] = {
+        { L"X角度:", IDC_DBG_HX_VAL, 18, 58 },
+        { L"Y角度:", IDC_DBG_HY_VAL, 164, 204 },
+        { L"按键:",  IDC_DBG_HBTN_VAL, 306, 344 },
+    };
+    for (int i = 0; i < 3; i++) {
+        int rowy = y + 20;
+        HWND hLbl = CreateWindowExW(0, L"STATIC", rowsA[i].label,
+                WS_CHILD | WS_VISIBLE, rowsA[i].lx, rowy, 40, 14, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hVal = CreateWindowExW(0, L"STATIC", L"",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                rowsA[i].vx, rowy, 80, 14, hDlg, (HMENU)(INT_PTR)rowsA[i].id, g_hInst, NULL);
+        SendMessageW(hVal, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
+    {
+        int rowy = y + 38;
+        struct { const wchar_t *label; int id; int lx; int vx; int vw; } rowB[] = {
+            { L"心跳时间:", IDC_DBG_HBTIME_VAL, 18, 76, 140 },
+            { L"帧数:",    IDC_DBG_HCNT_VAL, 236, 272, 60 },
+        };
+        for (int i = 0; i < 2; i++) {
+            HWND hLbl = CreateWindowExW(0, L"STATIC", rowB[i].label,
+                    WS_CHILD | WS_VISIBLE, rowB[i].lx, rowy, 56, 14, hDlg, NULL, g_hInst, NULL);
+            SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+            HWND hVal = CreateWindowExW(0, L"STATIC", L"",
+                    WS_CHILD | WS_VISIBLE | SS_LEFT,
+                    rowB[i].vx, rowy, rowB[i].vw, 14, hDlg,
+                    (HMENU)(INT_PTR)rowB[i].id, g_hInst, NULL);
+            SendMessageW(hVal, WM_SETFONT, (WPARAM)hFont, TRUE);
+        }
+    }
+    y += 72;
+    CreateWindowExW(0, L"BUTTON", L"扫描仪数据模拟发送",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, y, 436, 140, hDlg, NULL, g_hInst, NULL);
+
+    /* row1: 超挖值 + 激光距离 + 发送按钮 */
+    {
+        int rowy = y + 24;
+        HWND hLbl = CreateWindowExW(0, L"STATIC", L"超挖值:",
+                WS_CHILD | WS_VISIBLE, 20, rowy, 56, 16, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hOv = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                76, rowy - 2, 66, 21, hDlg, (HMENU)(INT_PTR)IDC_DBG_OVB, g_hInst, NULL);
+        SendMessageW(hOv, WM_SETFONT, (WPARAM)hFont, TRUE);
+        hLbl = CreateWindowExW(0, L"STATIC", L"激光距离:",
+                WS_CHILD | WS_VISIBLE, 156, rowy, 64, 16, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hLs = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"1000",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                224, rowy - 2, 66, 21, hDlg, (HMENU)(INT_PTR)IDC_DBG_LASER, g_hInst, NULL);
+        SendMessageW(hLs, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hBtn = CreateWindowExW(0, L"BUTTON", L"发送超挖/激光",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                326, rowy - 3, 110, 23, hDlg, (HMENU)(INT_PTR)IDC_DBG_SEND_ODO, g_hInst, NULL);
+        SendMessageW(hBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
+    /* row2: X坐标 + Y坐标 + 发送按钮 */
+    {
+        int rowy = y + 54;
+        HWND hLbl = CreateWindowExW(0, L"STATIC", L"X坐标:",
+                WS_CHILD | WS_VISIBLE, 20, rowy, 56, 16, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hCx = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"1000",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                76, rowy - 2, 66, 21, hDlg, (HMENU)(INT_PTR)IDC_DBG_CX, g_hInst, NULL);
+        SendMessageW(hCx, WM_SETFONT, (WPARAM)hFont, TRUE);
+        hLbl = CreateWindowExW(0, L"STATIC", L"Y坐标:",
+                WS_CHILD | WS_VISIBLE, 156, rowy, 56, 16, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hCy = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"2000",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                224, rowy - 2, 66, 21, hDlg, (HMENU)(INT_PTR)IDC_DBG_CY, g_hInst, NULL);
+        SendMessageW(hCy, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hBtn = CreateWindowExW(0, L"BUTTON", L"发送X/Y",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                326, rowy - 3, 110, 23, hDlg, (HMENU)(INT_PTR)IDC_DBG_SEND_XY, g_hInst, NULL);
+        SendMessageW(hBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
+    /* row3: Z坐标 + 发送按钮 */
+    {
+        int rowy = y + 84;
+        HWND hLbl = CreateWindowExW(0, L"STATIC", L"Z坐标:",
+                WS_CHILD | WS_VISIBLE, 20, rowy, 56, 16, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hCz = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"3000",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                76, rowy - 2, 66, 21, hDlg, (HMENU)(INT_PTR)IDC_DBG_CZ, g_hInst, NULL);
+        SendMessageW(hCz, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hBtn = CreateWindowExW(0, L"BUTTON", L"发送Z",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                326, rowy - 3, 110, 23, hDlg, (HMENU)(INT_PTR)IDC_DBG_SEND_Z, g_hInst, NULL);
+        SendMessageW(hBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
+    /* row4: 自动发送 + 周期 */
+    {
+        int rowy = y + 114;
+        HWND hAuto = CreateWindowExW(0, L"BUTTON", L"开始自动发送",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                326, rowy - 3, 110, 23, hDlg, (HMENU)(INT_PTR)IDC_DBG_AUTO, g_hInst, NULL);
+        SendMessageW(hAuto, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hLbl = CreateWindowExW(0, L"STATIC", L"周期(ms):",
+                WS_CHILD | WS_VISIBLE, 20, rowy, 56, 16, hDlg, NULL, g_hInst, NULL);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        HWND hPer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"500",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                80, rowy - 2, 40, 21, hDlg, (HMENU)(INT_PTR)IDC_DBG_PERIOD, g_hInst, NULL);
+        SendMessageW(hPer, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
+}
+
+/* 从输入框读取数值 (UI 线程调用). 空/非法返回 fallback */
+static int DbgGetEditInt(HWND hDlg, int id, int fallback)
+{
+    wchar_t wbuf[32] = { 0 };
+    GetWindowTextW(GetDlgItem(hDlg, id), wbuf, 32);
+    int v = _wtoi(wbuf);
+    return v ? v : fallback;
+}
+
+/* 从输入框读取字符串 (ASCII) */
+static void DbgGetEditText(HWND hDlg, int id, char *out, size_t cap)
+{
+    wchar_t wbuf[64] = { 0 };
+    GetWindowTextW(GetDlgItem(hDlg, id), wbuf, 64);
+    WideCharToMultiByte(CP_ACP, 0, wbuf, -1, out, (int)cap, NULL, NULL);
+}
+
+/* 经 gateway UDP 发送数据帧: [frame_id 2B BE][payload] */
+static void DbgSendFrame(uint16_t id, const uint8_t *payload, size_t plen)
+{
+    if (!g_dbgUdpConnected) return;
+    uint8_t buf[10];
+    buf[0] = (uint8_t)((id >> 8) & 0xFF);
+    buf[1] = (uint8_t)(id & 0xFF);
+    memcpy(buf + 2, payload, plen);
+    UdpManager_SendData(g_dbgUdp, buf, plen + 2);
+}
+
+/* 发送 0x263 超挖+激光 帧 (payload 大端, 与手柄/网关协议一致) */
+static void DbgSendOdo(HWND hDlg)
+{
+    int ovb = DbgGetEditInt(hDlg, IDC_DBG_OVB, 0);
+    int laser = DbgGetEditInt(hDlg, IDC_DBG_LASER, 1000);
+    uint8_t data[8] = { 0 };
+    data[0] = 0x03;                 /* bit0=overbreak_valid, bit1=laser_valid */
+    data[2] = (uint8_t)((ovb >> 8) & 0xFF);   /* overbreak int16 BE */
+    data[3] = (uint8_t)(ovb & 0xFF);
+    data[4] = (uint8_t)((laser >> 24) & 0xFF); /* laser uint32 BE */
+    data[5] = (uint8_t)((laser >> 16) & 0xFF);
+    data[6] = (uint8_t)((laser >> 8) & 0xFF);
+    data[7] = (uint8_t)(laser & 0xFF);
+    DbgSendFrame(CAN_ID_OVERBREAK_LASER, data, 8);
+}
+
+/* 发送 0x363 坐标 X/Y 帧 */
+static void DbgSendXY(HWND hDlg)
+{
+    int cx = DbgGetEditInt(hDlg, IDC_DBG_CX, 0);
+    int cy = DbgGetEditInt(hDlg, IDC_DBG_CY, 0);
+    uint8_t data[8] = { 0 };
+    data[0] = (uint8_t)((cx >> 24) & 0xFF);   /* coordX int32 BE */
+    data[1] = (uint8_t)((cx >> 16) & 0xFF);
+    data[2] = (uint8_t)((cx >> 8) & 0xFF);
+    data[3] = (uint8_t)(cx & 0xFF);
+    data[4] = (uint8_t)((cy >> 24) & 0xFF);   /* coordY int32 BE */
+    data[5] = (uint8_t)((cy >> 16) & 0xFF);
+    data[6] = (uint8_t)((cy >> 8) & 0xFF);
+    data[7] = (uint8_t)(cy & 0xFF);
+    DbgSendFrame(CAN_ID_COORD_XY, data, 8);
+}
+
+/* 发送 0x463 坐标 Z 帧 (data[4] bit0 = coordz_valid) */
+static void DbgSendZ(HWND hDlg)
+{
+    int cz = DbgGetEditInt(hDlg, IDC_DBG_CZ, 0);
+    uint8_t data[8] = { 0 };
+    data[0] = (uint8_t)((cz >> 24) & 0xFF);   /* coordZ int32 BE */
+    data[1] = (uint8_t)((cz >> 16) & 0xFF);
+    data[2] = (uint8_t)((cz >> 8) & 0xFF);
+    data[3] = (uint8_t)(cz & 0xFF);
+    data[4] = 0x01;                 /* coordz_valid */
+    DbgSendFrame(CAN_ID_COORD_Z, data, 8);
+}
+
+/* 自动发送工作线程: 周期发送全部三帧模拟数据, 每次数值取随机区间. */
+static DWORD WINAPI DbgAutoSendThread(LPVOID param)
+{
+    HWND hDlg = (HWND)param;
+    srand((unsigned)GetTickCount());
+    while (g_dbgAutoSend) {
+        if (!g_dbgUdpConnected) break;
+        uint8_t data[8] = { 0 };
+
+        /* 0x263 超挖+激光: bit0=overbreak_valid, bit1=laser_valid */
+        int ovb = -2000 + rand() % 4001;
+        int laser = rand() % 10001;
+        data[0] = 0x03;
+        data[2] = (uint8_t)((ovb >> 8) & 0xFF);
+        data[3] = (uint8_t)(ovb & 0xFF);
+        data[4] = (uint8_t)((laser >> 24) & 0xFF);
+        data[5] = (uint8_t)((laser >> 16) & 0xFF);
+        data[6] = (uint8_t)((laser >> 8) & 0xFF);
+        data[7] = (uint8_t)(laser & 0xFF);
+        DbgSendFrame(CAN_ID_OVERBREAK_LASER, data, 8);
+
+        /* 0x363 坐标 X/Y */
+        memset(data, 0, sizeof(data));
+        int cx = -5000 + rand() % 10001;
+        int cy = -5000 + rand() % 10001;
+        data[0] = (uint8_t)((cx >> 24) & 0xFF);
+        data[1] = (uint8_t)((cx >> 16) & 0xFF);
+        data[2] = (uint8_t)((cx >> 8) & 0xFF);
+        data[3] = (uint8_t)(cx & 0xFF);
+        data[4] = (uint8_t)((cy >> 24) & 0xFF);
+        data[5] = (uint8_t)((cy >> 16) & 0xFF);
+        data[6] = (uint8_t)((cy >> 8) & 0xFF);
+        data[7] = (uint8_t)(cy & 0xFF);
+        DbgSendFrame(CAN_ID_COORD_XY, data, 8);
+
+        /* 0x463 坐标 Z: data[4] bit0 = coordz_valid */
+        memset(data, 0, sizeof(data));
+        int cz = -5000 + rand() % 10001;
+        data[0] = (uint8_t)((cz >> 24) & 0xFF);
+        data[1] = (uint8_t)((cz >> 16) & 0xFF);
+        data[2] = (uint8_t)((cz >> 8) & 0xFF);
+        data[3] = (uint8_t)(cz & 0xFF);
+        data[4] = 0x01;
+        DbgSendFrame(CAN_ID_COORD_Z, data, 8);
+
+        int period = DbgGetEditInt(hDlg, IDC_DBG_PERIOD, 500);
+        if (period < 10) period = 10;
+        if (period > 60000) period = 60000;
+        Sleep(period);
+    }
+    g_dbgAutoSend = FALSE;
+    return 0;
+}
+
+/* 同步调试页 UDP 连接状态到 UI */
+static void SyncDebugUdp(HWND hDlg)
+{
+    if (!hDlg) hDlg = g_hTabDlg[4];
+    if (!hDlg) return;
+    SetWindowTextW(GetDlgItem(hDlg, IDC_DBG_CONNECT),
+                   g_dbgUdpConnected ? L"断开" : L"连接");
+    EnableWindow(GetDlgItem(hDlg, IDC_DBG_GW_IP), g_dbgUdpConnected ? FALSE : TRUE);
+    EnableWindow(GetDlgItem(hDlg, IDC_DBG_LOCAL_PORT), g_dbgUdpConnected ? FALSE : TRUE);
+}
+
+/* 调试页 UDP 连接/断开: 绑数据通道, 收发手柄/扫描帧.
+ * 网关 nRF24 数据转发目标已在 Tab1 配置为指向本机 (SET_HOST), 无需重复设置. */
+static void OnDebugUdpConnect(HWND hDlg)
+{
+    if (g_dbgUdpConnected) {
+        g_dbgAutoSend = FALSE;
+        UdpManager_Unbind(g_dbgUdp);
+        g_dbgUdpConnected = FALSE;
+        SyncDebugUdp(hDlg);
+        return;
+    }
+
+    char ip[64] = { 0 };
+    DbgGetEditText(hDlg, IDC_DBG_GW_IP, ip, sizeof(ip));
+    if (!ip[0] || inet_addr(ip) == INADDR_NONE) {
+        MessageBoxW(g_hMain, L"请填写网关 IP 地址", L"提示", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    int local_port = DbgGetEditInt(hDlg, IDC_DBG_LOCAL_PORT, 9602);
+    if (local_port <= 0 || local_port > 65535) local_port = 9602;
+    int gw_data_port = DBG_GW_DATA_PORT_DEFAULT;
+
+    /* 数据通道: 绑本地端口, 向网关数据端口发/收数据帧 */
+    if (!UdpManager_Bind(g_dbgUdp, UDP_CHAN_DATA, (uint16_t)local_port, ip, (uint16_t)gw_data_port)) {
+        int err = WSAGetLastError();
+        wchar_t wmsg[200];
+        swprintf(wmsg, 200,
+            L"网关连接失败\n本地端口 %d 可能被占用 (WSA 错误码: %d)\n请更换本地端口",
+            local_port, err);
+        MessageBoxW(g_hMain, wmsg, L"连接失败", MB_OK | MB_ICONERROR);
+        return;
+    }
+    UdpManager_StartRxThread(g_dbgUdp);
+    g_dbgUdpConnected = TRUE;
+    SyncDebugUdp(hDlg);
+}
+
 /* CAN 帧回调: 收到 0x111 RF24 配置响应时填 g_handlerAddr 并置标志.
  * 新格式 [cmd 1B][addr 5B][reserved 2B] (信道固定 1, 不返回). */
 static void can_frame_cb(const CanFrame *frame, void *user_data)
@@ -561,6 +932,31 @@ static void can_frame_cb(const CanFrame *frame, void *user_data)
     if (frame->id == CAN_ID_RF24_CONFIG_RESP && frame->dlc >= 6) {
         memcpy(g_handlerAddr, frame->data + 1, 5);
         g_handlerAddrGot = TRUE;
+    }
+}
+
+/* 调试页 UDP 数据回调: 解析经 gateway 转发的手柄数据帧.
+ * 帧格式: [frame_id 2B BE][payload]:
+ *   0x1E3 手柄状态: [x 2B BE][y 2B BE][btn];  0x763 心跳: [1B]. */
+static void dbg_udp_data_cb(const uint8_t *data, size_t len, void *user_data)
+{
+    (void)user_data;
+    if (len < 2) return;
+    uint16_t id = (uint16_t)((data[0] << 8) | data[1]);
+    const uint8_t *p = data + 2;
+    size_t plen = len - 2;
+    if (id == CAN_ID_HANDLER_STATE && plen >= 5) {
+        g_dbgX = (int)((int16_t)((p[0] << 8) | p[1]));
+        g_dbgY = (int)((int16_t)((p[2] << 8) | p[3]));
+        g_dbgBtn = p[4];
+        g_dbgFrameCnt++;
+        PostMessageW(g_hMain, WM_DBG_HANDLER, 0, 0);
+    } else if (id == CAN_ID_HEARTBEAT && plen >= 1) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        g_dbgHeartHMS = (DWORD)(st.wHour * 10000 + st.wMinute * 100 + st.wSecond);
+        g_dbgFrameCnt++;
+        PostMessageW(g_hMain, WM_DBG_HANDLER, 0, 0);
     }
 }
 
@@ -1388,6 +1784,31 @@ static void OnTabCommand(HWND hChildDlg, WPARAM wParam)
         case IDC_DISC_START:         OnDiscoverStart(hChildDlg); break;
         case IDC_DISC_COPY:          OnDiscoverCopy(hChildDlg);  break;
         }
+    } else if (tabIdx == 4) {
+        /* 调试页 (Tab5): 网关 UDP 连接 + 扫描仪模拟发送 + 自动发送开关 */
+        switch (cmdId) {
+        case IDC_DBG_CONNECT:        OnDebugUdpConnect(hChildDlg);    break;
+        case IDC_DBG_SEND_ODO:       DbgSendOdo(hChildDlg);           break;
+        case IDC_DBG_SEND_XY:        DbgSendXY(hChildDlg);            break;
+        case IDC_DBG_SEND_Z:         DbgSendZ(hChildDlg);             break;
+        case IDC_DBG_AUTO:
+            if (g_dbgAutoSend) {
+                /* 停止: 置标志, 工作线程下一轮自我退出 */
+                g_dbgAutoSend = FALSE;
+                SetWindowTextW(GetDlgItem(hChildDlg, IDC_DBG_AUTO), L"开始自动发送");
+            } else {
+                if (!g_dbgUdpConnected) {
+                    MessageBoxW(g_hMain, L"请先在本页连接网关", L"提示",
+                                MB_OK | MB_ICONWARNING);
+                    break;
+                }
+                g_dbgAutoSend = TRUE;
+                SetWindowTextW(GetDlgItem(hChildDlg, IDC_DBG_AUTO), L"停止自动发送");
+                if (g_dbgSendThread) CloseHandle(g_dbgSendThread);
+                g_dbgSendThread = CreateThread(NULL, 0, DbgAutoSendThread, hChildDlg, 0, NULL);
+            }
+            break;
+        }
     }
 }
 
@@ -1409,6 +1830,7 @@ static void CreateTabLayout(HWND hWnd)
     SendMessageW(g_hTab, TCM_INSERTITEMW, 2, (LPARAM)&ti);
     ti.pszText = (LPWSTR)L"设备查找";
     SendMessageW(g_hTab, TCM_INSERTITEMW, 3, (LPARAM)&ti);
+    /* 调试页默认隐藏, 由 Ctrl+Shift+B 切换 (见 ToggleDebugTab) */
 
     /* Tab 标题字体: Segoe UI 常规, 字号×SCALE (1.5x → -18) */
     HFONT hTabFont = CreateFontW(S(-12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -1423,7 +1845,7 @@ static void CreateTabLayout(HWND hWnd)
 
     RegisterTabChildClass();
     DWORD childStyle = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         g_hTabDlg[i] = CreateWindowExW(0, TABCHILD_CLASS, L"",
                 childStyle,
                 rcTab.left, rcTab.top,
@@ -1438,10 +1860,11 @@ static void CreateTabLayout(HWND hWnd)
     CreateBindTabControls(g_hTabDlg[1]);
     CreateFwUpgradeTabControls(g_hTabDlg[2]);
     CreateDiscoverTabControls(g_hTabDlg[3]);
+    CreateDebugTabControls(g_hTabDlg[4]);
 
     /* 全局 1.5x 缩放: 控件已按原坐标建完, 这里后处理缩放每个 tab 子对话框的子控件 + 换字体.
      * tab 子对话框自身尺寸已由 rcTab (来自缩放后的 g_hTab) 确定, 无需再缩. */
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         ScaleChildWindows(g_hTabDlg[i]);
     }
 
@@ -1590,19 +2013,50 @@ static void FW_Done(HWND hParent, BOOL success)
     SetForegroundWindow(g_progressDlg);
 }
 
+/* 切换调试 tab 显示/隐藏 (Ctrl+Shift+B 触发).
+ * 调试页始终为最后一个 tab item, 其 g_hTabDlg 索引固定为 4. */
+static void ToggleDebugTab(void)
+{
+    g_dbgTabShown = !g_dbgTabShown;
+    if (g_dbgTabShown) {
+        TCITEMW ti;
+        ti.mask = TCIF_TEXT;
+        ti.pszText = (LPWSTR)L"调试";
+        SendMessageW(g_hTab, TCM_INSERTITEMW, 4, (LPARAM)&ti);
+        /* 自动选中调试页并显示其组件, 免去手动点击 */
+        SendMessageW(g_hTab, TCM_SETCURSEL, 4, 0);
+        for (int i = 0; i < 5; i++)
+            ShowWindow(g_hTabDlg[i], i == 4 ? SW_SHOW : SW_HIDE);
+    } else {
+        int sel = (int)SendMessageW(g_hTab, TCM_GETCURSEL, 0, 0);
+        if (sel == 4) {
+            SendMessageW(g_hTab, TCM_SETCURSEL, 0, 0);
+            for (int i = 0; i < 5; i++)
+                ShowWindow(g_hTabDlg[i], i == 0 ? SW_SHOW : SW_HIDE);
+        }
+        SendMessageW(g_hTab, TCM_DELETEITEM, 4, 0);
+        ShowWindow(g_hTabDlg[4], SW_HIDE);
+    }
+}
+
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
     case WM_CREATE:
         g_hMain = hWnd;
         CreateTabLayout(hWnd);
+        RegisterHotKey(hWnd, IDH_TOGGLE_DEBUG, MOD_CONTROL | MOD_SHIFT, 'B');
+        return 0;
+
+    case WM_HOTKEY:
+        if (wParam == IDH_TOGGLE_DEBUG) ToggleDebugTab();
         return 0;
 
     case WM_NOTIFY: {
         LPNMHDR nmh = (LPNMHDR)lParam;
         if (nmh->hwndFrom == g_hTab && nmh->code == TCN_SELCHANGE) {
             int sel = (int)SendMessageW(g_hTab, TCM_GETCURSEL, 0, 0);
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 5; i++) {
                 ShowWindow(g_hTabDlg[i], i == sel ? SW_SHOW : SW_HIDE);
             }
         }
@@ -1611,6 +2065,26 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_APP + 100: {
         OnTabCommand((HWND)lParam, wParam);   /* wParam 含控件 ID (LOWORD) */
+        return 0;
+    }
+
+    case WM_DBG_HANDLER: {
+        /* 调试页收到手柄数据/心跳, 刷新只读标签 */
+        HWND hDbg = g_hTabDlg[4];
+        if (hDbg) {
+            wchar_t tmp[32];
+            swprintf(tmp, 32, L"%d", g_dbgX);
+            SetWindowTextW(GetDlgItem(hDbg, IDC_DBG_HX_VAL), tmp);
+            swprintf(tmp, 32, L"%d", g_dbgY);
+            SetWindowTextW(GetDlgItem(hDbg, IDC_DBG_HY_VAL), tmp);
+            swprintf(tmp, 32, L"%d", g_dbgBtn);
+            SetWindowTextW(GetDlgItem(hDbg, IDC_DBG_HBTN_VAL), tmp);
+            DWORD hms = g_dbgHeartHMS;
+            swprintf(tmp, 32, L"%02d:%02d:%02d", hms / 10000, (hms / 100) % 100, hms % 100);
+            SetWindowTextW(GetDlgItem(hDbg, IDC_DBG_HBTIME_VAL), tmp);
+            swprintf(tmp, 32, L"%d", g_dbgFrameCnt);
+            SetWindowTextW(GetDlgItem(hDbg, IDC_DBG_HCNT_VAL), tmp);
+        }
         return 0;
     }
 
@@ -1700,6 +2174,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
 
     case WM_DESTROY:
+        UnregisterHotKey(hWnd, IDH_TOGGLE_DEBUG);
         PostQuitMessage(0);
         return 0;
     }
@@ -1716,7 +2191,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_hInst = hInstance;
 
     /* 创建 CAN/UDP 管理器: 各 CAN tab 独立 CanManager (Tab1 绑定 / Tab2 升级).
-     * 只有 BIND tab 挂 frame_cb (处理 0x111 NRF 响应); UPGRADE tab 只用于固件升级 */
+     * BIND tab 挂 frame_cb (处理 0x111 NRF 响应); UPGRADE tab 只用于固件升级.
+     * Tab5 调试页用独立 UDP 数据通道 (见下方 g_dbgUdp). */
     for (int i = 0; i < CAN_TAB_COUNT; i++) {
         g_canTab[i] = CanManager_Create();
         g_canTabChannel[i] = -1;
@@ -1729,6 +2205,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_cfgUdp[UDP_TAB_CFG] = UdpManager_Create();
     UdpManager_SetMsgCallback(g_cfgUdp[UDP_TAB_BIND], udp_msg_cb, NULL);
     UdpManager_SetMsgCallback(g_cfgUdp[UDP_TAB_CFG], udp_msg_cb, NULL);
+
+    /* Tab5 调试: UDP 数据通道 (收发经 gateway 的数据帧);
+     * 网关 nRF24 转发目标已在 Tab1 配置为指向本机, 无需 SET_HOST. */
+    g_dbgUdp = UdpManager_Create();
+    UdpManager_SetDataCallback(g_dbgUdp, dbg_udp_data_cb, NULL);
 
     WNDCLASSW wc = { 0 };
     wc.lpfnWndProc = MainWndProc;
@@ -1779,11 +2260,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
     /* 消息循环退出后销毁 */
+    g_dbgAutoSend = FALSE;
+    if (g_dbgSendThread) {
+        WaitForSingleObject(g_dbgSendThread, 2000);
+        CloseHandle(g_dbgSendThread);
+        g_dbgSendThread = NULL;
+    }
     for (int i = 0; i < CAN_TAB_COUNT; i++) {
         if (g_canTab[i]) CanManager_Destroy(g_canTab[i]);
     }
     for (int i = 0; i < UDP_TAB_COUNT; i++) {
         if (g_cfgUdp[i]) UdpManager_Destroy(g_cfgUdp[i]);
     }
+    if (g_dbgUdp) UdpManager_Destroy(g_dbgUdp);
     return (int)m.wParam;
 }
