@@ -1,0 +1,46 @@
+name: Release
+
+# 打 v 开头的 tag (如 v1.0.0) 时触发: MSVC 构建并创建 GitHub Release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # 创建 Release / 上传资产需要写 contents
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 配置 MSVC 环境
+        uses: ilammy/msvc-dev-shell@v1
+        with:
+          arch: x64
+
+      - name: CMake 配置 (vs preset)
+        run: cmake --preset vs
+
+      - name: 构建 Release
+        run: cmake --build out --config Release
+
+      - name: 打包 zip
+        # 产物: out/bin/Release/HandlerReceiver.exe (与 tools/build.bat 一致)
+        # zip 内只含 exe 本身 (PCANBasic.dll 运行时按需加载, 不打包)
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zip = "HandlerReceiver-$tag.zip"
+          Compress-Archive -Path "out\bin\Release\HandlerReceiver.exe" -DestinationPath $zip
+          Write-Host "打包完成: $zip"
+
+      - name: 创建 Release 并上传
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: HandlerReceiver-${{ github.ref_name }}.zip
+          generate_release_notes: true
