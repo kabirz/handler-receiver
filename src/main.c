@@ -964,7 +964,8 @@ static void can_frame_cb(const CanFrame *frame, void *user_data)
 
 /* 调试页 UDP 数据回调: 解析经 gateway 转发的手柄数据帧.
  * 帧格式: [frame_id 2B BE][payload]:
- *   0x1E3 手柄状态: [x 2B BE][y 2B BE][btn];  0x763 心跳: [1B]. */
+ *   0x1E3 手柄状态: [x 2B BE][y 2B BE][btn], x/y 单位 0.1° (手柄固件 v1.0.3 起);
+ *   0x763 心跳: [1B]. */
 static void dbg_udp_data_cb(const uint8_t *data, size_t len, void *user_data)
 {
     (void)user_data;
@@ -2167,9 +2168,10 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         HWND hDbg = g_hTabDlg[4];
         if (hDbg) {
             wchar_t tmp[32];
-            swprintf(tmp, 32, L"%d", g_dbgX);
+            /* x/y 帧值单位 0.1°, ÷10 以一位小数显示度数 */
+            swprintf(tmp, 32, L"%.1f", g_dbgX / 10.0);
             SetWindowTextW(GetDlgItem(hDbg, IDC_DBG_HX_VAL), tmp);
-            swprintf(tmp, 32, L"%d", g_dbgY);
+            swprintf(tmp, 32, L"%.1f", g_dbgY / 10.0);
             SetWindowTextW(GetDlgItem(hDbg, IDC_DBG_HY_VAL), tmp);
             swprintf(tmp, 32, L"%d", g_dbgBtn);
             SetWindowTextW(GetDlgItem(hDbg, IDC_DBG_HBTN_VAL), tmp);
