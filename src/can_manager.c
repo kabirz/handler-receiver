@@ -1,16 +1,18 @@
 #include "can_manager.h"
-#include "pcan_loader.h"
+#include "can_backend.h"
 #include "fw_image.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* ================================================================
- * CAN 管理器
+ * CAN 管理器 (协议层, 厂商无关; 硬件访问经 can_backend 分发)
  * ================================================================ */
 struct CanManager {
 	CRITICAL_SECTION cs;
-	TPCANHandle channel;
+	const CanBackend *be;             /* 当前连接的后端 */
+	void *be_ctx;                     /* 后端上下文 */
+	CanDeviceInfo dev;                /* 当前连接的设备 (GetDevice 返回) */
 	bool connected;
 	can_msg_callback msg_cb;
 	void *msg_data;
@@ -32,8 +34,16 @@ struct CanManager {
 	volatile bool ver_got[32];
 	char ver_text[32][7];
 
-	/* 最近一次 Connect 失败的 PCAN status (0=OK). 供上层友好提示占用/不存在 */
+	/* 最近一次 Connect 失败的厂商原始状态码 (0=OK) 及所属后端 (用于取错误文本).
+	 * 供上层友好提示占用/不存在 */
 	uint32_t last_error;
+	const CanBackend *last_error_be;
+};
+
+/* 后端注册表: 设备列表顺序 = 枚举顺序 (PCAN 在前, IXXAT 在后) */
+const CanBackend *const can_backends[CAN_BACKEND_COUNT] = {
+	&can_backend_pcan,
+	&can_backend_vci,
 };
 
 CanManager *CanManager_Create(void)
@@ -41,7 +51,8 @@ CanManager *CanManager_Create(void)
 	CanManager *mgr = (CanManager *)calloc(1, sizeof(CanManager));
 	if (mgr) {
 		InitializeCriticalSection(&mgr->cs);
-		mgr->channel = 0;
+		mgr->be = NULL;
+		mgr->be_ctx = NULL;
 		mgr->connected = false;
 		mgr->fw_event = CreateEvent(NULL, TRUE, FALSE, NULL);
 	}
@@ -57,30 +68,46 @@ void CanManager_Destroy(CanManager *mgr)
 	free(mgr);
 }
 
-bool CanManager_Connect(CanManager *mgr, int channel, int baudrate)
+bool CanManager_Connect(CanManager *mgr, const CanDeviceInfo *dev, int baud_bps)
 {
-	if (!mgr || !Pcan_Initialize) return false;
+	if (!mgr || !dev) return false;
+
+	/* 按设备厂商选择后端 */
+	const CanBackend *be = NULL;
+	for (int i = 0; i < CAN_BACKEND_COUNT; i++) {
+		if (can_backends[i]->vendor == dev->vendor) {
+			be = can_backends[i];
+			break;
+		}
+	}
+	if (!be) return false;
 
 	EnterCriticalSection(&mgr->cs);
 
-	TPCANStatus status = Pcan_Initialize((uint32_t)channel, (uint32_t)baudrate, 0, 0, 0);
-	if (status != PCAN_ERROR_OK) {
-		mgr->last_error = status;
+	void *ctx = NULL;
+	uint32_t err = 0;
+	if (!be->connect(dev->handle, baud_bps, &ctx, &err)) {
+		mgr->last_error = err;
+		mgr->last_error_be = be;
 		LeaveCriticalSection(&mgr->cs);
 		if (mgr->msg_cb) mgr->msg_cb("CAN连接失败", mgr->msg_data);
 		return false;
 	}
-	mgr->last_error = PCAN_ERROR_OK;
+	mgr->last_error = 0;
+	mgr->last_error_be = be;
 
-	mgr->channel = (TPCANHandle)channel;
+	mgr->be = be;
+	mgr->be_ctx = ctx;
+	mgr->dev = *dev;
 	mgr->connected = true;
 
-	/* 配置接收过滤器: 固件响应(0x102)、版本字符串(0x105)、RF24 配置(0x111)、手柄状态/心跳.
-	 * 0x105 单独加 (不与 0x102 连号范围, 各精确匹配), 否则版本多帧被驱动层丢弃. */
-	Pcan_FilterMessages(mgr->channel, CAN_ID_PLATFORM_TX, CAN_ID_PLATFORM_TX, 0);
-	Pcan_FilterMessages(mgr->channel, CAN_ID_VERSION_STR, CAN_ID_VERSION_STR, 0);
-	Pcan_FilterMessages(mgr->channel, CAN_ID_RF24_CONFIG_RESP, CAN_ID_RF24_CONFIG_RESP, 0);
-	Pcan_FilterMessages(mgr->channel, CAN_ID_HANDLER_STATE, CAN_ID_HEARTBEAT, 0);
+	/* 配置接收过滤: 固件响应(0x102)、版本字符串(0x105)、RF24 配置(0x111)、手柄状态/心跳.
+	 * 0x105 单独加 (不与 0x102 连号范围, 各精确匹配), 否则版本多帧被驱动层丢弃.
+	 * PCAN 为硬件验收过滤, IXXAT 为软件门控. */
+	be->add_rx_range(ctx, CAN_ID_PLATFORM_TX, CAN_ID_PLATFORM_TX);
+	be->add_rx_range(ctx, CAN_ID_VERSION_STR, CAN_ID_VERSION_STR);
+	be->add_rx_range(ctx, CAN_ID_RF24_CONFIG_RESP, CAN_ID_RF24_CONFIG_RESP);
+	be->add_rx_range(ctx, CAN_ID_HANDLER_STATE, CAN_ID_HEARTBEAT);
 
 	LeaveCriticalSection(&mgr->cs);
 
@@ -95,9 +122,11 @@ void CanManager_Disconnect(CanManager *mgr)
 	CanManager_StopRxThread(mgr);
 
 	EnterCriticalSection(&mgr->cs);
-	if (Pcan_Uninitialize) {
-		Pcan_Uninitialize(mgr->channel);
+	if (mgr->be && mgr->be_ctx) {
+		mgr->be->disconnect(mgr->be_ctx);
 	}
+	mgr->be = NULL;
+	mgr->be_ctx = NULL;
 	mgr->connected = false;
 	LeaveCriticalSection(&mgr->cs);
 
@@ -109,10 +138,10 @@ bool CanManager_IsConnected(CanManager *mgr)
 	return mgr && mgr->connected;
 }
 
-int CanManager_GetChannel(CanManager *mgr)
+const CanDeviceInfo *CanManager_GetDevice(CanManager *mgr)
 {
-	if (!mgr || !mgr->connected) return -1;
-	return (int)mgr->channel;
+	if (!mgr || !mgr->connected) return NULL;
+	return &mgr->dev;
 }
 
 uint32_t CanManager_GetLastError(CanManager *mgr)
@@ -120,43 +149,35 @@ uint32_t CanManager_GetLastError(CanManager *mgr)
 	return mgr ? mgr->last_error : 0;
 }
 
-int CanManager_DetectDevice(CanManager *mgr, char devices[][256], int max_devices)
+void CanManager_GetLastErrorText(CanManager *mgr, char *buf, size_t buf_len)
 {
-	/* 惰性加载 PCANBasic.dll: 首次检测时按需加载, 驱动未安装则返回 0 */
-	if (!Pcan_LookUpChannel) {
-		if (!PcanLoader_Load()) return 0;
+	if (!buf || buf_len == 0) return;
+	buf[0] = '\0';
+	if (mgr && mgr->last_error_be && mgr->last_error_be->error_text) {
+		mgr->last_error_be->error_text(mgr->last_error, buf, buf_len);
 	}
-	if (!Pcan_LookUpChannel) return 0;
+}
 
+int CanManager_DetectDevice(CanManager *mgr, CanDeviceInfo *devices, int max_devices)
+{
+	(void)mgr;
+	/* 依次枚举各后端已安装驱动的设备, 混排进同一列表 */
 	int count = 0;
-	for (uint32_t i = 0; i < 16 && count < max_devices; i++) {
-		TPCANHandle ch = PCAN_NONEBUS;
-		char szLookup[64];
-		sprintf(szLookup, "devicetype=pcan_usb,controllernumber=%u", i);
-		if (Pcan_LookUpChannel(szLookup, &ch) == PCAN_ERROR_OK && ch != PCAN_NONEBUS) {
-			sprintf(devices[count], "PCAN-USB: %02Xh", ch);
-			count++;
-		}
+	for (int i = 0; i < CAN_BACKEND_COUNT && count < max_devices; i++) {
+		count += can_backends[i]->detect(devices + count, max_devices - count);
 	}
 	return count;
 }
 
 bool CanManager_Send(CanManager *mgr, uint32_t id, const uint8_t *data, uint8_t len)
 {
-	if (!mgr || !mgr->connected || !Pcan_Write) return false;
+	if (!mgr || !mgr->connected || !mgr->be || !mgr->be_ctx) return false;
 
 	EnterCriticalSection(&mgr->cs);
-
-	TPCANMsg msg;
-	msg.id = id;
-	msg.msgtype = 0;
-	msg.len = len;
-	memcpy(msg.data, data, len);
-
-	TPCANStatus status = Pcan_Write(mgr->channel, &msg);
+	bool ok = mgr->be->send(mgr->be_ctx, id, data, len);
 	LeaveCriticalSection(&mgr->cs);
 
-	return (status == PCAN_ERROR_OK);
+	return ok;
 }
 
 bool CanManager_SendFrame(CanManager *mgr, const CanFrame *frame)
@@ -172,37 +193,36 @@ static DWORD WINAPI rx_thread_proc(LPVOID param)
 	CanManager *mgr = (CanManager *)param;
 
 	while (mgr->rx_running) {
-		if (!mgr->connected || !Pcan_Read) {
+		if (!mgr->connected || !mgr->be || !mgr->be_ctx) {
 			Sleep(10);
 			continue;
 		}
 
-		TPCANMsg msg;
-		TPCANTimestampMsg ts;
+		CanFrame frame;
 
 		EnterCriticalSection(&mgr->cs);
-		TPCANStatus status = Pcan_Read(mgr->channel, &msg, &ts);
+		int rd = mgr->be->read(mgr->be_ctx, &frame);
 		LeaveCriticalSection(&mgr->cs);
 
-		if (status == PCAN_ERROR_OK) {
+		if (rd == 0) {
 			/* 固件响应帧 (0x102): 存入 fw_response 并唤醒等待者.
 			 * 若是 VERSION 响应 (code=2), offset = 版本字符串总长度,
 			 * 据此算预期 0x105 帧数并开启多帧收集模式. */
-			if (msg.id == CAN_ID_PLATFORM_TX) {
+			if (frame.id == CAN_ID_PLATFORM_TX) {
 				EnterCriticalSection(&mgr->cs);
-				mgr->fw_response.id = msg.id;
-				mgr->fw_response.dlc = msg.len;
-				memcpy(mgr->fw_response.data, msg.data, msg.len);
+				mgr->fw_response.id = frame.id;
+				mgr->fw_response.dlc = frame.dlc;
+				memcpy(mgr->fw_response.data, frame.data, frame.dlc);
 				mgr->fw_got_response = true;
 				/* VERSION 响应: offset=字符串总字节数, 据此算 0x105 帧数 (每帧 7B).
 				 * 重置 ver_got, 标记查询进行中, 让 GetVersionStr 轮询收集. */
-				if (msg.len >= 1 && msg.data[0] == FW_CODE_VERSION) {
+				if (frame.dlc >= 1 && frame.data[0] == FW_CODE_VERSION) {
 					uint32_t total_len = 0;
-					if (msg.len >= 8) {
-						total_len = (uint32_t)msg.data[4] |
-							    ((uint32_t)msg.data[5] << 8) |
-							    ((uint32_t)msg.data[6] << 16) |
-							    ((uint32_t)msg.data[7] << 24);
+					if (frame.dlc >= 8) {
+						total_len = (uint32_t)frame.data[4] |
+							    ((uint32_t)frame.data[5] << 8) |
+							    ((uint32_t)frame.data[6] << 16) |
+							    ((uint32_t)frame.data[7] << 24);
 					}
 					/* 帧数 = ceil(total_len / 7), 上限 32 */
 					uint8_t frames = (uint8_t)((total_len + 6) / 7);
@@ -218,13 +238,13 @@ static DWORD WINAPI rx_thread_proc(LPVOID param)
 			}
 
 			/* 版本字符串分帧 (0x105): [seq 1B][text 7B]. 查询进行中时按 seq 存入缓冲. */
-			if (msg.id == CAN_ID_VERSION_STR && mgr->ver_query_active && msg.len >= 1) {
-				uint8_t seq = msg.data[0];
+			if (frame.id == CAN_ID_VERSION_STR && mgr->ver_query_active && frame.dlc >= 1) {
+				uint8_t seq = frame.data[0];
 				EnterCriticalSection(&mgr->cs);
 				if (seq < 32) {
-					uint8_t txt_len = msg.len - 1;
+					uint8_t txt_len = frame.dlc - 1;
 					if (txt_len > 7) txt_len = 7;
-					memcpy(mgr->ver_text[seq], msg.data + 1, txt_len);
+					memcpy(mgr->ver_text[seq], frame.data + 1, txt_len);
 					/* 不足 7B 的末帧补 '\0' 填充 (协议约定), 便于拼接时统一截断 */
 					if (txt_len < 7) {
 						memset(mgr->ver_text[seq] + txt_len, 0, 7 - txt_len);
@@ -235,20 +255,14 @@ static DWORD WINAPI rx_thread_proc(LPVOID param)
 			}
 
 		/* 应用帧: 经 frame_cb 上抛 (RF24 配置响应、手柄数据、心跳) */
-		if (msg.id == CAN_ID_RF24_CONFIG_RESP ||
-			    (msg.id >= CAN_ID_HANDLER_STATE && msg.id <= CAN_ID_HEARTBEAT)) {
-				CanFrame frame;
-				frame.id = msg.id;
-				frame.dlc = msg.len;
-				memcpy(frame.data, msg.data, msg.len);
-
+		if (frame.id == CAN_ID_RF24_CONFIG_RESP ||
+			    (frame.id >= CAN_ID_HANDLER_STATE && frame.id <= CAN_ID_HEARTBEAT)) {
 				if (mgr->frame_cb) {
 					mgr->frame_cb(&frame, mgr->frame_data);
 				}
 			}
 		} else {
-			/* 非成功状态 (含 0x00020 = PCAN_ERROR_QRCVEMPTY 接收队列空):
-			 * 均让出 CPU 等待下一轮 */
+			/* 队列空或状态异常: 均让出 CPU 等待下一轮 */
 			Sleep(1);
 		}
 	}

@@ -19,7 +19,6 @@
 #include "resource.h"
 #include "can_manager.h"
 #include "fw_image.h"
-#include "pcan_loader.h"
 #include "udp_manager.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -112,13 +111,20 @@ static HWND g_hTab;
 static HWND g_hTabDlg[5];
 
 /* CAN 各 tab 独立: g_canTab[0]=Tab1 绑定用 (带 frame_cb 处理 NRF), g_canTab[1]=Tab2 升级用.
- * 每个 tab 持有独立 CanManager 实例 + 独立连接状态, 互不影响 (同一 PCAN 设备被一个 tab
- * Initialize 后, 另一个 tab 再 Initialize 同设备会失败 → 弹窗友好提示占用) */
+ * 每个 tab 持有独立 CanManager 实例 + 独立连接状态, 互不影响 (同一 CAN 设备被一个 tab
+ * 打开后, 另一个 tab 再打开同设备会失败 → 弹窗友好提示占用; 支持 PCAN 与 IXXAT VCI 混用) */
 #define CAN_TAB_BIND    0   /* Tab1: 手柄绑定 (NRF 读取) */
 #define CAN_TAB_UPGRADE 1   /* Tab2: 手柄固件升级 */
 #define CAN_TAB_COUNT   2
 static CanManager *g_canTab[CAN_TAB_COUNT];
-static int g_canTabChannel[CAN_TAB_COUNT];   /* 各 tab 已连接的 channel, -1=未连接 */
+static int g_canTabChannel[CAN_TAB_COUNT];   /* 各 tab 已连接标记 (设备 handle), -1=未连接 */
+static CanDeviceInfo g_canTabDev[CAN_TAB_COUNT];   /* 各 tab 已连接的设备 (跨页占用判断比较 vendor+handle) */
+
+/* 各子对话框 (按 GWLP_USERDATA 下标) 最近一次刷新得到的 CAN 设备列表, 与下拉框条目同序.
+ * 连接时按下拉选中下标取设备 (PCAN / IXXAT 混排, 不再从显示文本反解句柄) */
+#define CAN_DEV_MAX 16
+static CanDeviceInfo g_canDevList[5][CAN_DEV_MAX];
+static int g_canDevCount[5];
 
 /* 接收机 UDP 管理器: Tab1(绑定) 和 Tab3(配置) 各用独立实例, 互不耦合.
  * g_udpTabIdx 0=Tab1, 1=Tab3. */
@@ -252,17 +258,18 @@ static void RegisterTabChildClass(void)
 /* 主窗口过程 */
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-/* 刷新手柄设备下拉框 (扫 PCAN_USB 通道, 仿 gateway-tool RefreshDevices).
- * tabIdx 决定用哪个 CanManager 实例扫描 (各 tab 独立) */
+/* 刷新手柄设备下拉框 (枚举 PCAN / IXXAT 设备, 仿 gateway-tool RefreshDevices).
+ * tabIdx 为子对话框 GWLP_USERDATA 下标, 设备列表缓存到 g_canDevList[tabIdx] 供连接时取用 */
 static void RefreshCanDevices(HWND hCombo, int tabIdx)
 {
     SendMessageW(hCombo, CB_RESETCONTENT, 0, 0);
-    char devices[16][256];
-    int count = CanManager_DetectDevice(g_canTab[tabIdx], devices, 16);
+    if (tabIdx < 0 || tabIdx >= 5) return;
+    int count = CanManager_DetectDevice(NULL, g_canDevList[tabIdx], CAN_DEV_MAX);
+    g_canDevCount[tabIdx] = count;
     for (int i = 0; i < count; i++) {
         /* 设备名是 ASCII, 转 wchar_t 加入下拉 */
-        wchar_t wname[256];
-        MultiByteToWideChar(CP_ACP, 0, devices[i], -1, wname, 256);
+        wchar_t wname[64];
+        MultiByteToWideChar(CP_ACP, 0, g_canDevList[tabIdx][i].display, -1, wname, 64);
         SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)wname);
     }
     if (count > 0) {
@@ -1038,45 +1045,39 @@ static void OnCanConnect(HWND hChildDlg)
         SyncCanConnState(canTabIdx);
         return;
     }
-    /* 连接: 从下拉取选中设备名 */
+    /* 连接: 按下拉选中下标取刷新时缓存的设备 (PCAN / IXXAT 混排) */
     int sel = (int)SendMessageW(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), CB_GETCURSEL, 0, 0);
-    if (sel < 0) {
+    if (sel < 0 || tabIdx < 0 || tabIdx >= 5 || sel >= g_canDevCount[tabIdx]) {
         MessageBoxW(g_hMain, L"请先选择设备 (或点刷新扫描)", L"提示",
                     MB_OK | MB_ICONWARNING);
         return;
     }
-    wchar_t wname[256] = { 0 };
-    SendMessageW(GetDlgItem(hChildDlg, IDC_CAN_DEVICE), CB_GETLBTEXT, sel, (LPARAM)wname);
-    char dev[256] = { 0 };
-    WideCharToMultiByte(CP_ACP, 0, wname, -1, dev, sizeof(dev), NULL, NULL);
+    const CanDeviceInfo *dev = &g_canDevList[tabIdx][sel];
 
-    int channel = 0;
-    sscanf(dev, "PCAN-USB: %Xh", &channel);
-
-    /* 先检查: 另一个 CAN tab 是否已占同一 channel → 友好提示 */
+    /* 先检查: 另一个 CAN tab 是否已占同一设备 (同厂商同句柄) → 友好提示 */
     for (int other = 0; other < CAN_TAB_COUNT; other++) {
-        if (other != canTabIdx && g_canTabChannel[other] == channel) {
+        if (other != canTabIdx && g_canTabChannel[other] >= 0 &&
+            g_canTabDev[other].vendor == dev->vendor &&
+            g_canTabDev[other].handle == dev->handle) {
             wchar_t wmsg[160];
             const wchar_t *otherName = (other == CAN_TAB_BIND) ? L"手柄绑定页" : L"固件升级页";
             swprintf(wmsg, 160,
-                L"设备 %hs 已被本工具 %s 占用\n请先在该页断开, 或选择其他设备", dev, otherName);
+                L"设备 %hs 已被本工具 %s 占用\n请先在该页断开, 或选择其他设备",
+                dev->display, otherName);
             MessageBoxW(g_hMain, wmsg, L"设备被占用", MB_OK | MB_ICONWARNING);
             return;
         }
     }
 
-    if (!CanManager_Connect(g_canTab[canTabIdx], channel, PCAN_BAUD_250K)) {
-        /* 连接失败: 用 PCAN status 友好提示. status==0 但失败=异常; 否则按常见码归类 */
+    if (!CanManager_Connect(g_canTab[canTabIdx], dev, 250000)) {
+        /* 连接失败: 用厂商状态码友好提示. status==0 但失败=异常; 否则附带厂商错误文本 (英文) */
         uint32_t st = CanManager_GetLastError(g_canTab[canTabIdx]);
         wchar_t wmsg[200];
         if (st == 0) {
-            swprintf(wmsg, 200, L"连接失败\n设备 %hs 可能未正确连接或驱动异常", dev);
+            swprintf(wmsg, 200, L"连接失败\n设备 %hs 可能未正确连接或驱动异常", dev->display);
         } else {
-            /* 取 PCAN 错误文本 (英文, Pcan_GetErrorText 在 pcan_loader 已加载) */
-            char err[256] = "PCAN error";
-            if (Pcan_GetErrorText) {
-                Pcan_GetErrorText(st, 0x0409 /* English */, err);  /* 中文 0x0804 可能不支持, 用英文 */
-            }
+            char err[128];
+            CanManager_GetLastErrorText(g_canTab[canTabIdx], err, sizeof(err));
             swprintf(wmsg, 200,
                 L"连接失败 (0x%X)\n%hs\n\n设备可能被其他程序占用, 或设备未连接",
                 st, err);
@@ -1097,7 +1098,8 @@ static void OnCanConnect(HWND hChildDlg)
         }
     }
     /* 验证通过 (Tab1) 或非 Tab1 (Tab2): 正式标记已连接 */
-    g_canTabChannel[canTabIdx] = channel;
+    g_canTabChannel[canTabIdx] = (int)dev->handle;
+    g_canTabDev[canTabIdx] = *dev;
     SyncCanConnState(canTabIdx);
     if (canTabIdx == CAN_TAB_UPGRADE) {
         /* 升级 tab 连接成功后自动读版本; 失败弹框提示用户检查连接 */

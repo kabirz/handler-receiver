@@ -20,8 +20,9 @@ typedef uint32_t TPCANStatus;
 /* 默认通道句柄, 表示未占用 */
 #define PCAN_NONEBUS            0x00U
 
-/* PCAN 波特率 (BTR0BTR1 寄存器值) */
+/* PCAN 波特率 (BTR0BTR1 寄存器值, 与官方 PCANBasic.h 一致) */
 #define PCAN_BAUD_1M            0x0014
+#define PCAN_BAUD_800K          0x0016
 #define PCAN_BAUD_500K          0x001C
 #define PCAN_BAUD_250K          0x011C
 #define PCAN_BAUD_125K          0x031C
@@ -29,6 +30,8 @@ typedef uint32_t TPCANStatus;
 #define PCAN_BAUD_95K           0xC34E
 #define PCAN_BAUD_83K           0x852B
 #define PCAN_BAUD_50K           0x472F
+#define PCAN_BAUD_20K           0x532F
+#define PCAN_BAUD_10K           0x672F
 
 /* 通道信息结构 (CAN_GetAttachedChannels 用) */
 typedef struct {

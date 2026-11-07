@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(HandlerReceiver VERSION 1.0.2 LANGUAGES C RC)
+project(HandlerReceiver VERSION 1.0.3 LANGUAGES C RC)
 
 set(CMAKE_C_STANDARD 11)
 
@@ -10,8 +10,11 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 set(SOURCES
     src/main.c
     src/can_manager.c
+    src/can_backend_pcan.c
+    src/can_backend_vci.c
     src/udp_manager.c
     src/pcan_loader.c
+    src/vci_loader.c
     src/fw_image.c
 )
 

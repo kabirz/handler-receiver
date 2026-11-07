@@ -1,6 +1,6 @@
 # Handler Receiver
 
-手柄-接收机配置工具,基于 Win32 原生 GUI(C 语言)。提供接收机网络配置、手柄绑定、固件升级、设备发现等功能,通过 PCAN-USB(CAN)与 UDP 与设备通信。
+手柄-接收机配置工具,基于 Win32 原生 GUI(C 语言)。提供接收机网络配置、手柄绑定、固件升级、设备发现等功能,通过 CAN(PEAK PCAN-USB 或 IXXAT VCI 接口)与 UDP 与设备通信。
 
 ## 功能
 
@@ -32,8 +32,8 @@
 .
 ├── CMakeLists.txt          # 构建脚本 (C11, Win32 GUI 子系统)
 ├── CMakePresets.json        # MinGW 交叉编译 / Visual Studio 预设
-├── include/                 # 模块接口 (can/udp/fw/pcan)
-├── src/                     # 模块实现 + Win32 UI (main.c)
+├── include/                 # 模块接口 (can/udp/fw/pcan/vci)
+├── src/                     # 模块实现 + Win32 UI (main.c); can_backend_* 为 PCAN / IXXAT 硬件后端
 ├── resources/               # 图标 + Windows 资源文件
 └── tools/build.bat          # MSVC 一键编译脚本
 ```
@@ -67,7 +67,9 @@ cmake --build build --config Release
 
 ## 依赖
 
-- **PCAN-USB API**:CAN 通信依赖 PEAK PCAN-USB 驱动与 `PCANBasic.h`(由 `src/can_manager.c` 调用)。
+- **CAN 接口驱动**(二选一或混用,均为运行时动态加载,不需要 SDK 头文件):
+  - PEAK PCAN-USB:安装 PCAN 驱动(提供 `PCANBasic.dll`)。
+  - IXXAT(USB-to-CAN 等):安装 VCI 驱动(提供 `vcinpl.dll`,走 VCI 3 兼容 C API)。使用 VCI 4 驱动时安装须勾选 "VCI 3 API" 组件,否则枚举不到 IXXAT 设备。
 - **Winsock2 / iphlpapi**:UDP 通信与本机网卡枚举,系统自带。
 
 ## 许可

@@ -45,6 +45,19 @@ typedef struct {
 	uint8_t data[8];
 } CanFrame;
 
+/* CAN 硬件厂商 */
+typedef enum {
+	CAN_VENDOR_PCAN = 0,
+	CAN_VENDOR_IXXAT,
+} CanVendor;
+
+/* 枚举出的 CAN 设备 (DetectDevice 输出, Connect 入参) */
+typedef struct {
+	CanVendor vendor;
+	uintptr_t handle;      /* 后端句柄: PCAN=通道句柄, IXXAT=枚举索引 */
+	char display[64];      /* 设备下拉框显示文本 */
+} CanDeviceInfo;
+
 /* 回调类型: 状态消息 / 数据帧 */
 typedef void (*can_msg_callback)(const char *msg, void *user_data);
 typedef void (*can_frame_callback)(const CanFrame *frame, void *user_data);
@@ -56,20 +69,23 @@ typedef struct CanManager CanManager;
 CanManager *CanManager_Create(void);
 void CanManager_Destroy(CanManager *mgr);
 
-/* 连接管理 */
-bool CanManager_Connect(CanManager *mgr, int channel, int baudrate);
+/* 连接管理
+ * Connect 按设备的 vendor 分发到对应硬件后端 (PCAN / IXXAT VCI),
+ * baud_bps 为普通波特率 (如 250000), 由后端换算厂商定时参数 */
+bool CanManager_Connect(CanManager *mgr, const CanDeviceInfo *dev, int baud_bps);
 void CanManager_Disconnect(CanManager *mgr);
 bool CanManager_IsConnected(CanManager *mgr);
 
-/* 当前已连接的 PCAN channel (未连接返回 -1). 用于跨实例占用判断 */
-int CanManager_GetChannel(CanManager *mgr);
+/* 当前已连接的设备 (未连接返回 NULL). 用于跨实例占用判断 (比较 vendor + handle) */
+const CanDeviceInfo *CanManager_GetDevice(CanManager *mgr);
 
-/* 最近一次 Connect 失败时的 PCAN status (成功返回 PCAN_ERROR_OK=0).
- * 用于友好提示失败原因 (设备不存在 / 被占用等) */
+/* 最近一次 Connect 失败时的厂商原始状态码 (PCAN TPCANStatus / VCI HRESULT; 成功为 0).
+ * 用于友好提示失败原因 (设备不存在 / 被占用等); GetLastErrorText 取对应英文说明 */
 uint32_t CanManager_GetLastError(CanManager *mgr);
+void CanManager_GetLastErrorText(CanManager *mgr, char *buf, size_t buf_len);
 
-/* 设备枚举 (扫描 PCAN-USB 通道) */
-int CanManager_DetectDevice(CanManager *mgr, char devices[][256], int max_devices);
+/* 设备枚举 (扫描已安装驱动的全部 CAN 接口, PCAN 与 IXXAT 混排) */
+int CanManager_DetectDevice(CanManager *mgr, CanDeviceInfo *devices, int max_devices);
 
 /* 数据发送 */
 bool CanManager_Send(CanManager *mgr, uint32_t id, const uint8_t *data, uint8_t len);
